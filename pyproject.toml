@@ -1,0 +1,18 @@
+[project]
+name = "live2dselfrigging"
+version = "0.1.0"
+description = "Animated web mascot for the DeepSeek-chan Live2D model"
+readme = "README.md"
+authors = [
+    { name = "4890A", email = "16848266+4890A@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = []
+
+[project.scripts]
+live2dselfrigging = "live2dselfrigging:main"
+make-motions = "live2dselfrigging.motions:main"
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"

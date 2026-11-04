@@ -1,0 +1,27 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Web app
+node_modules/
+
+# Model files: the license forbids redistributing the model/PSD, so keep them out of git.
+# Regenerate web/public/model with `uv run live2dselfrigging`.
+*.zip
+assets/
+web/public/model/
+
+# Local experiments and generated speech
+.scratch/
+
+# Separate git repositories used by the speech pipeline
+Irodori-TTS/
+Irodori-TTS-Server/
+__pycache__/
