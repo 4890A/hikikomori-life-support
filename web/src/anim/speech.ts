@@ -40,12 +40,58 @@ export interface TurnTrace {
   cost?: number | null;
 }
 
+/** Why a line was made: shown in the panel, and never sent anywhere. */
+export interface LineInfo {
+  reason: string;
+  frame: string | null;
+  said: string | null;
+}
+
 interface Scheduled {
+  line: PreparedLine;
   segment: SpeechSegment;
   startAt: number;
   endAt: number;
   nextCue: number;
   source: AudioBufferSourceNode;
+  heard: boolean;
+}
+
+/** One reply: generated in the background, and only heard if it gets played. */
+export class PreparedLine {
+  turnId: string | null = null;
+  receiving = true;
+  failed = false;
+  error = '';
+  playing = false;
+  /** Set once it can't make any more sound. */
+  finished = false;
+  expression: { emotion: string; emoji: string } | null = null;
+  /** Ready to play, but not scheduled yet. */
+  decoded: { segment: SpeechSegment; buffer: AudioBuffer }[] = [];
+  scheduled: Scheduled[] = [];
+  /** Everything written so far, whether heard or not. */
+  written: string[] = [];
+  /** The sentences that have started playing. */
+  heard: string[] = [];
+  /** performance.now() when each stage was reached. */
+  stages: { writing?: number; tts?: number; ready?: number; speaking?: number } = {};
+  readonly requestedAt = performance.now();
+  readonly abort = new AbortController();
+  gain: GainNode | null = null;
+  settled: Promise<void> = Promise.resolve();
+
+  constructor(readonly info: LineInfo) {}
+
+  /** True once there's audio to play, or it has failed or come up empty. */
+  get ready() {
+    return this.decoded.length > 0 || this.scheduled.length > 0;
+  }
+
+  /** True if it ended with nothing to say. */
+  get empty() {
+    return !this.receiving && !this.ready;
+  }
 }
 
 const VOWEL_OF: Record<string, Vowel> = { a: 'A', i: 'I', u: 'U', e: 'E', o: 'O' };
@@ -53,43 +99,78 @@ const VOWEL_OF: Record<string, Vowel> = { a: 'A', i: 'I', u: 'U', e: 'E', o: 'O'
 const CUE_LEAD_SECONDS = 0.15;
 // Arm poses take longer to arrive than a face change.
 const ARM_CUE_LEAD_SECONDS = 0.45;
-// Breath between separately synthesized segments.
+// Breath between sentences of one reply.
 const SEGMENT_GAP_SECONDS = 0.12;
+// Pause when she changes course at the end of a sentence.
+const SWITCH_GAP_SECONDS = 0.25;
+const SCHEDULE_LEAD_SECONDS = 0.05;
+// How long her voice takes to fade when you speak over her.
+const FADE_SECONDS = 0.15;
 // How long a reply's opening face holds before audio takes over with its own cues.
 const EXPRESSION_HOLD_SECONDS = 6;
 
 const decodeBase64 = (data: string) => Uint8Array.from(atob(data), (c) => c.charCodeAt(0)).buffer;
 
 /**
- * Plays speech from the bridge, in sync with the audio clock: segments are queued gaplessly as
- * they arrive, the lip track drives the mouth and expression cues fire at their aligned times.
+ * Plays speech from the bridge, in sync with the audio clock. A line can be prepared in the
+ * background while another plays, and sound never overlaps: the next one starts after the current
+ * sentence. The lip track drives the mouth and expression cues fire at their aligned times.
  */
 export class SpeechPlayer {
   onStatus?: (message: string, busy: boolean) => void;
-  onSegment?: (segment: SpeechSegment) => void;
+  /** A sentence has started playing. */
+  onSegment?: (segment: SpeechSegment, line: PreparedLine) => void;
   onCue?: (cue: SpeechCue, segmentTime: number) => void;
   onTrace?: (trace: TurnTrace) => void;
-  /** Seconds since the request was sent, as seen in the browser. */
+  /** Seconds since the line was requested. */
   onFace?: (emoji: string, seconds: number) => void;
   onFirstAudio?: (seconds: number) => void;
+  /** A line that played is over, listing the sentences that were heard. */
+  onLineDone?: (line: PreparedLine) => void;
 
   private ctx: AudioContext | null = null;
   private queue: Scheduled[] = [];
-  private abort: AbortController | null = null;
-  private receiving = false;
-  private requestedAt = 0;
-  private audioScheduled = false;
+  private current: PreparedLine | null = null;
   private holdingFace = false;
 
   constructor(private readonly animator: Animator) {
     animator.talk.source = () => this.frame();
   }
 
-  /** True while generating or playing. Uses the audio clock, because frames stop when she's hidden. */
+  /** The line being played, or last played. */
+  get line() {
+    return this.current;
+  }
+
+  /** True while the line being played is still generating or making sound. */
   get active() {
-    if (this.receiving) return true;
+    if (this.current?.receiving && !this.current.finished) return true;
     const now = this.ctx?.currentTime ?? 0;
     return this.queue.some((item) => item.endAt > now);
+  }
+
+  /** Seconds until she finishes, or null while more of the line may still arrive. */
+  get secondsLeft() {
+    if (this.current?.receiving && !this.current.finished) return null;
+    return Math.max(0, this.lastEnd - (this.ctx?.currentTime ?? 0));
+  }
+
+  /** True if she can still change course at a sentence end before the line is over. */
+  get hasLaterSentences() {
+    const line = this.current;
+    if (!line || line.finished) return false;
+    if (line.receiving) return true;
+    const now = this.ctx?.currentTime ?? 0;
+    return line.decoded.length > 0 || line.scheduled.some((item) => item.startAt > now);
+  }
+
+  /** What she's in the middle of saying, for writing a line that follows it. */
+  get saying() {
+    return this.active && this.current ? this.current.written.join('') : '';
+  }
+
+  private get lastEnd() {
+    return this.queue.length > 0 ? this.queue[this.queue.length - 1].endAt : 0;
   }
 
   /** Call from a click handler, or the browser blocks audio that starts later without one. */
@@ -98,60 +179,187 @@ export class SpeechPlayer {
     void this.ctx.resume();
   }
 
+  /** Glances away for a moment, as if something caught her eye. */
+  glance() {
+    this.animator.gaze.glance();
+  }
+
+  /** Whether she's talking about what's on screen, so she looks at it. */
+  watchScreen(on: boolean) {
+    this.animator.gaze.watchingScreen = on;
+  }
+
   speak(text: string) {
     return this.playStream('/speech/speak', { text });
   }
 
-  /** Plays a stream of expression, segment and trace lines from the bridge. */
+  /** Stops everything and plays a stream as it arrives. */
   async playStream(url: string, body: unknown) {
     this.stop();
+    const line = this.prepare(url, body, { reason: '', frame: null, said: null });
+    this.play(line);
+    await line.settled;
+  }
+
+  /** Starts generating a line in the background. Nothing is heard until it's played. */
+  prepare(url: string, body: unknown, info: LineInfo) {
     this.unlock();
-    this.requestedAt = performance.now();
-    this.audioScheduled = false;
-    const abort = new AbortController();
-    this.abort = abort;
-    this.receiving = true;
-    this.onStatus?.('Generating speech…', true);
+    const line = new PreparedLine(info);
+    line.settled = this.receive(line, url, body);
+    return line;
+  }
+
+  /** Plays a line straight after whatever is playing. Later sentences follow as they arrive. */
+  play(line: PreparedLine, gap = SEGMENT_GAP_SECONDS, notBefore = 0) {
+    const ctx = this.ctx!;
+    line.playing = true;
+    this.current = line;
+    line.gain = ctx.createGain();
+    line.gain.connect(ctx.destination);
+    this.onStatus?.('Speaking…', true);
+    const waiting = line.decoded;
+    line.decoded = [];
+    waiting.forEach((item, index) => this.schedule(line, item.segment, item.buffer, index === 0 ? gap : SEGMENT_GAP_SECONDS, notBefore));
+    if (waiting.length === 0) this.holdFace(line);
+    if (line.stages.ready) this.onFirstAudio?.((line.stages.ready - line.requestedAt) / 1000);
+    if (line.empty || line.failed) this.finish(line);
+  }
+
+  /** Changes course at the end of this sentence: later sentences of this line won't be heard. */
+  switchTo(next: PreparedLine) {
+    const now = this.ctx!.currentTime;
+    const old = this.current;
+    if (old) {
+      old.abort.abort();
+      old.receiving = false;
+      old.decoded = [];
+      for (const item of old.scheduled.filter((scheduled) => scheduled.startAt > now)) {
+        item.source.stop();
+        this.queue = this.queue.filter((queued) => queued !== item);
+      }
+      old.scheduled = old.scheduled.filter((item) => item.startAt <= now);
+      this.finish(old);
+    }
+    this.play(next, SWITCH_GAP_SECONDS);
+  }
+
+  /** Fades her voice quickly and plays this line next, for when you speak to her. */
+  fadeInto(next: PreparedLine) {
+    const ctx = this.ctx!;
+    const now = ctx.currentTime;
+    const old = this.current;
+    if (old) {
+      old.abort.abort();
+      old.receiving = false;
+      old.decoded = [];
+      old.gain?.gain.setValueAtTime(1, now);
+      old.gain?.gain.linearRampToValueAtTime(0, now + FADE_SECONDS);
+      for (const item of old.scheduled) item.source.stop(now + FADE_SECONDS);
+      this.queue = this.queue.filter((item) => item.line !== old);
+      old.scheduled = old.scheduled.filter((item) => item.startAt <= now);
+      this.finish(old);
+    }
+    this.play(next, 0, now + FADE_SECONDS);
+  }
+
+  /** Drops a line that isn't playing. Nothing about it was heard. */
+  cancel(line: PreparedLine) {
+    line.abort.abort();
+    line.receiving = false;
+    line.finished = true;
+    line.decoded = [];
+  }
+
+  /** Stops at once. */
+  stop() {
+    const line = this.current;
+    if (line) {
+      line.abort.abort();
+      line.receiving = false;
+      line.decoded = [];
+      for (const item of line.scheduled) item.source.stop();
+      line.scheduled = line.scheduled.filter((item) => item.startAt <= (this.ctx?.currentTime ?? 0));
+    }
+    if (this.queue.length > 0 || this.holdingFace) this.animator.endReaction();
+    this.holdingFace = false;
+    this.queue = [];
+    if (line) this.finish(line);
+    this.onStatus?.('', false);
+  }
+
+  /** Notices sentences starting and lines ending, from the audio clock, so it runs while she's hidden. */
+  poll() {
+    const now = this.ctx?.currentTime;
+    if (now === undefined) return;
+    for (const item of this.queue) {
+      if (!item.heard && item.startAt <= now) {
+        item.heard = true;
+        item.line.heard.push(item.segment.text);
+        item.line.stages.speaking ??= performance.now();
+        this.holdingFace = false;
+        this.onSegment?.(item.segment, item.line);
+      }
+    }
+    const line = this.current;
+    if (line && !line.finished && !line.receiving && line.decoded.length === 0 && line.scheduled.every((item) => item.endAt <= now)) {
+      this.finish(line);
+      if (!this.active) this.onStatus?.('', false);
+    }
+  }
+
+  private finish(line: PreparedLine) {
+    if (line.finished) return;
+    this.pollHeard(line);
+    line.finished = true;
+    this.onLineDone?.(line);
+  }
+
+  /** Sentences that started before the line ended, in case nothing has polled since. */
+  private pollHeard(line: PreparedLine) {
+    const now = this.ctx?.currentTime ?? 0;
+    for (const item of line.scheduled) {
+      if (!item.heard && item.startAt <= now) {
+        item.heard = true;
+        line.heard.push(item.segment.text);
+        this.onSegment?.(item.segment, line);
+      }
+    }
+  }
+
+  private holdFace(line: PreparedLine) {
+    if (!line.expression) return;
+    this.holdingFace = true;
+    this.animator.react(line.expression.emotion, EXPRESSION_HOLD_SECONDS, { arms: false });
+    this.onFace?.(line.expression.emoji, (performance.now() - line.requestedAt) / 1000);
+  }
+
+  private async receive(line: PreparedLine, url: string, body: unknown) {
+    const { signal } = line.abort;
     try {
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal: abort.signal,
+        signal,
       });
       if (!response.ok || !response.body) throw new Error(`speech bridge returned ${response.status}`);
-      await this.readLines(response.body, abort.signal);
-      if (!abort.signal.aborted) this.onStatus?.('Speaking…', true);
+      await this.readLines(line, response.body, signal);
     } catch (err) {
-      if (abort.signal.aborted) return;
-      this.releaseFace();
-      this.onStatus?.(`Speech failed: ${err instanceof Error ? err.message : err}. Are the TTS server and bridge running?`, false);
+      if (signal.aborted) return;
+      line.failed = true;
+      line.error = err instanceof Error ? err.message : String(err);
+      if (line.playing) {
+        if (this.holdingFace) this.animator.endReaction();
+        this.holdingFace = false;
+        this.onStatus?.(`Speech failed: ${line.error}. Are the TTS server and bridge running?`, false);
+      }
     } finally {
-      if (this.abort === abort) this.receiving = false;
+      line.receiving = false;
+      if (line.playing && line.empty) this.finish(line);
     }
   }
 
-  stop() {
-    this.abort?.abort();
-    this.abort = null;
-    this.receiving = false;
-    for (const item of this.queue) {
-      item.source.onended = null;
-      item.source.stop();
-    }
-    if (this.queue.length > 0) this.animator.endReaction();
-    else this.releaseFace();
-    this.holdingFace = false;
-    this.queue = [];
-    this.onStatus?.('', false);
-  }
-
-  private releaseFace() {
-    if (this.holdingFace) this.animator.endReaction();
-    this.holdingFace = false;
-  }
-
-  private async readLines(body: ReadableStream<Uint8Array>, signal: AbortSignal) {
+  private async readLines(line: PreparedLine, body: ReadableStream<Uint8Array>, signal: AbortSignal) {
     const reader = body.getReader();
     const decoder = new TextDecoder();
     let pending = '';
@@ -161,51 +369,59 @@ export class SpeechPlayer {
       pending += decoder.decode(value, { stream: true });
       const lines = pending.split('\n');
       pending = lines.pop() ?? '';
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        const message = JSON.parse(line);
+      for (const raw of lines) {
+        if (!raw.trim()) continue;
+        const message = JSON.parse(raw);
         if (message.type === 'error') throw new Error(message.message);
-        if (message.type === 'segment') await this.enqueue(message as SpeechSegment, signal);
+        if (message.type === 'turn') line.turnId = message.turn_id;
         if (message.type === 'trace') this.onTrace?.(message as TurnTrace);
-        if (message.type === 'expression') {
-          this.holdingFace = true;
-          this.animator.react(message.emotion, EXPRESSION_HOLD_SECONDS, { arms: false });
-          this.onFace?.(message.emoji, (performance.now() - this.requestedAt) / 1000);
+        if (message.type === 'stage') {
+          if (message.stage === 'writing') line.stages.writing ??= performance.now();
+          if (message.stage === 'tts') line.stages.tts ??= performance.now();
         }
+        if (message.type === 'expression') {
+          line.expression = { emotion: message.emotion, emoji: message.emoji };
+          if (line.playing && !line.ready) this.holdFace(line);
+        }
+        if (message.type === 'segment') await this.receiveSegment(line, message as SpeechSegment, signal);
       }
     }
   }
 
-  private async enqueue(segment: SpeechSegment, signal: AbortSignal) {
-    const ctx = this.ctx!;
-    const buffer = await ctx.decodeAudioData(decodeBase64(segment.audio_base64));
+  private async receiveSegment(line: PreparedLine, segment: SpeechSegment, signal: AbortSignal) {
+    const buffer = await this.ctx!.decodeAudioData(decodeBase64(segment.audio_base64));
     if (signal.aborted) return;
+    line.written.push(segment.text);
+    if (!line.stages.ready) {
+      line.stages.ready = performance.now();
+      if (line.playing) this.onFirstAudio?.((line.stages.ready - line.requestedAt) / 1000);
+    }
+    if (line.playing) this.schedule(line, segment, buffer);
+    else line.decoded.push({ segment, buffer });
+  }
+
+  private schedule(line: PreparedLine, segment: SpeechSegment, buffer: AudioBuffer, gap = SEGMENT_GAP_SECONDS, notBefore = 0) {
+    const ctx = this.ctx!;
     const source = ctx.createBufferSource();
     source.buffer = buffer;
-    source.connect(ctx.destination);
-    const last = this.queue[this.queue.length - 1];
-    const startAt = Math.max(ctx.currentTime + 0.05, last ? last.endAt + SEGMENT_GAP_SECONDS : 0);
+    source.connect(line.gain ?? ctx.destination);
+    const lastEnd = this.lastEnd;
+    const startAt = Math.max(ctx.currentTime + SCHEDULE_LEAD_SECONDS, lastEnd > 0 ? lastEnd + gap : 0, notBefore);
     source.start(startAt);
-    this.holdingFace = false;
-    if (!this.audioScheduled) {
-      this.audioScheduled = true;
-      this.onFirstAudio?.((performance.now() - this.requestedAt) / 1000 + (startAt - ctx.currentTime));
-    }
-    this.queue.push({ segment, startAt, endAt: startAt + buffer.duration, nextCue: 0, source });
+    const item: Scheduled = { line, segment, startAt, endAt: startAt + buffer.duration, nextCue: 0, source, heard: false };
+    this.queue.push(item);
+    line.scheduled.push(item);
     this.onStatus?.(segment.count === null ? 'Speaking…' : `Speaking… (part ${segment.index + 1}/${segment.count})`, true);
-    this.onSegment?.(segment);
   }
 
   /** Called once per animation frame by the Talker: fires due cues, returns the current mouth. */
   private frame(): { open: number; vowel: Vowel | null } | null {
+    this.poll();
     if (!this.ctx || this.queue.length === 0) return null;
     // outputLatency is how long audio takes to reach the speakers after it is scheduled.
     const now = this.ctx.currentTime - (this.ctx.outputLatency || 0);
 
-    while (this.queue.length > 0 && now > this.queue[0].endAt) {
-      this.queue.shift();
-      if (this.queue.length === 0 && !this.receiving) this.onStatus?.('', false);
-    }
+    while (this.queue.length > 0 && now > this.queue[0].endAt) this.queue.shift();
     const item = this.queue[0];
     if (!item) return null;
 

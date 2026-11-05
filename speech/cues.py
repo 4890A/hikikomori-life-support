@@ -188,7 +188,7 @@ def split_segments(text: str) -> list[str]:
     return [s.strip() for s in segments if s.strip()]
 
 
-# Short sentences are merged with the next one: see split_segments on very short inputs.
+# By default short sentences are merged with the next one: see split_segments on very short inputs.
 MIN_STREAM_SEGMENT_CHARS = 8
 # A runaway or repeating LLM reply stops being spoken past this length.
 MAX_SPOKEN_CHARS = 80
@@ -228,7 +228,8 @@ def _split_trailing_emoji(text: str) -> tuple[str, str]:
 class StreamSegmenter:
     """Cuts streamed text into segments as soon as each sentence and its trailing emoji are complete."""
 
-    def __init__(self) -> None:
+    def __init__(self, min_chars: int = MIN_STREAM_SEGMENT_CHARS) -> None:
+        self._min_chars = min_chars
         self._buffer = ""
         self._pending = ""
 
@@ -241,7 +242,7 @@ class StreamSegmenter:
         segments: list[str] = []
         for sentence in parts[:-1]:
             self._pending += sentence
-            if _spoken_length(self._pending) >= MIN_STREAM_SEGMENT_CHARS:
+            if _spoken_length(self._pending) >= self._min_chars:
                 # More text follows, so an emoji after the punctuation opens that text ("…！🤭次は").
                 body, opener = _split_trailing_emoji(self._pending)
                 segments.extend(split_segments(body))
@@ -267,8 +268,8 @@ class ReplyParser:
     sentence repeats or the length cap is reached, because cheap models sometimes loop.
     """
 
-    def __init__(self) -> None:
-        self._segmenter = StreamSegmenter()
+    def __init__(self, min_segment_chars: int = MIN_STREAM_SEGMENT_CHARS) -> None:
+        self._segmenter = StreamSegmenter(min_segment_chars)
         self._spoken_raw = ""
         self._summary_raw: str | None = None
         self._held = ""

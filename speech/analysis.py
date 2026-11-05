@@ -16,8 +16,8 @@ from huggingface_hub import snapshot_download
 from transformers import HubertForCTC
 
 from cues import Fragment, Item
+from model_source import PHONEME_MODEL, PHONEME_REVISION
 
-MODEL_REPO = "prj-beatrice/japanese-hubert-base-phoneme-ctc-v4"
 SAMPLE_RATE = 16000
 TRACK_FPS = 50
 MODEL_HOP = 320  # samples per model frame
@@ -70,7 +70,7 @@ class Analysis:
 
 class PhonemeModel:
     def __init__(self) -> None:
-        path = Path(snapshot_download(MODEL_REPO))
+        path = Path(snapshot_download(PHONEME_MODEL, revision=PHONEME_REVISION))
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = HubertForCTC.from_pretrained(path).to(self.device).eval()
         vocab: dict[str, int] = json.loads((path / "vocab.json").read_text(encoding="utf-8"))

@@ -1,6 +1,7 @@
 import * as PIXI from 'pixi.js';
 import { Animator } from './anim/animator';
 import { SpeechPlayer } from './anim/speech';
+import { DesktopGaze } from './companion/desktopGaze';
 import { Director } from './companion/director';
 import { drawablesUnderPart, filterDrawables, loadRig } from './live2d';
 import { MirrorArm } from './mirrorArm';
@@ -21,6 +22,8 @@ const VIEWS: Record<ViewName, { zoom: number; fx: number; fy: number }> = {
 async function boot() {
   const canvas = document.getElementById('stage') as HTMLCanvasElement;
   const app = new PIXI.Application({ view: canvas, resizeTo: window, backgroundAlpha: 0, antialias: true });
+  // More frames wouldn't look any better, and the GPU is shared with TTS and whatever is on screen.
+  app.ticker.maxFPS = 60;
 
   let animator: Animator | null = null;
   let mirror: MirrorArm | null = null;
@@ -74,7 +77,11 @@ async function boot() {
     const v: Float32Array = internal.getDrawableVertices(noseIndex);
     return model.toGlobal(new PIXI.Point(v[0], v[1]));
   };
+  const desktopGaze = new DesktopGaze(animator.gaze, faceScreen);
+  app.ticker.add(() => desktopGaze.update());
+  // Only needed when the bridge can't say where the mouse is.
   window.addEventListener('pointermove', (e) => {
+    if (desktopGaze.live) return;
     const face = faceScreen();
     const reach = Math.max(window.innerWidth, window.innerHeight) * 0.45;
     animator!.gaze.setPointer((e.clientX - face.x) / reach, (face.y - e.clientY) / reach);
@@ -94,7 +101,8 @@ async function boot() {
 
   const speech = new SpeechPlayer(animator);
   const director = new Director(speech);
-  buildPanel(panel, animator, speech, director, setView);
+  director.onShare = (source) => desktopGaze.share(source);
+  buildPanel(panel, animator, speech, director, desktopGaze, setView);
   fit();
 
   // Load the mirrored open-hand arm in the background; gestures wait for nothing.

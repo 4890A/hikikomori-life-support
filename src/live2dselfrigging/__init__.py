@@ -77,4 +77,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.zip is None or not args.zip.exists():
         raise SystemExit("model zip not found; pass --zip")
-    setup_model(args.zip, args.out)
+    try:
+        setup_model(args.zip, args.out)
+    except zipfile.BadZipFile:
+        raise SystemExit(f"{args.zip} isn't a valid zip. It may not have finished downloading.") from None

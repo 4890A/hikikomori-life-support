@@ -1,18 +1,15 @@
 import { ACTIONS, type ActionName, type Animator } from './anim/animator';
 import { EMOTIONS } from './anim/emotions';
 import type { SpeechPlayer } from './anim/speech';
+import { buildCharacterPanel } from './companion/characterPanel';
+import type { DesktopGaze, SharedSide } from './companion/desktopGaze';
 import { CHATTINESS, type Chattiness, type Director } from './companion/director';
+import { buildProviderPanel } from './companion/providerPanel';
+import { buildTurnMonitor } from './companion/turnMonitor';
+import { el, section } from './dom';
 import type { ViewName } from './main';
 
-const el = <K extends keyof HTMLElementTagNameMap>(tag: K, props: Record<string, unknown> = {}, ...children: (Node | string)[]): HTMLElementTagNameMap[K] => {
-  const node = Object.assign(document.createElement(tag), props);
-  node.append(...children);
-  return node;
-};
-
-const section = (title: string, ...children: Node[]) => el('section', {}, el('h2', { textContent: title }), ...children);
-
-export function buildPanel(root: HTMLElement, animator: Animator, speech: SpeechPlayer, director: Director, setView: (v: ViewName) => void) {
+export function buildPanel(root: HTMLElement, animator: Animator, speech: SpeechPlayer, director: Director, desktopGaze: DesktopGaze, setView: (v: ViewName) => void) {
   // Emotions, with number-key shortcuts.
   const names = Object.keys(EMOTIONS);
   const buttons = new Map<string, HTMLButtonElement>();
@@ -49,6 +46,8 @@ export function buildPanel(root: HTMLElement, animator: Animator, speech: Speech
   const companionStatus = el('p', { className: 'hint' });
   const companionTiming = el('p', { className: 'hint' });
   const companionLog = el('ul', { className: 'cues' });
+  const providers = buildProviderPanel();
+  const monitor = buildTurnMonitor(speech, director);
   const say = el('input', { type: 'text', placeholder: '話しかける… (Enter)' });
   const chattiness = el('select', { title: 'How often she comments' });
   chattiness.append(...Object.keys(CHATTINESS).map((level) => el('option', { value: level, textContent: level[0].toUpperCase() + level.slice(1) })));
@@ -85,6 +84,11 @@ export function buildPanel(root: HTMLElement, animator: Animator, speech: Speech
     turns += 1;
     showTiming();
   };
+  director.onProblem = (message) => {
+    companionStatus.textContent = message.includes('OPENROUTER_API_KEY')
+      ? 'She needs an OpenRouter key to write replies. Run setup.ps1 to add one, then restart her.'
+      : `Couldn't prepare a line: ${message}`;
+  };
   director.onStopped = () => {
     startCompanion.textContent = '▶ Start Companion';
     startCompanion.classList.remove('active');
@@ -96,6 +100,7 @@ export function buildPanel(root: HTMLElement, animator: Animator, speech: Speech
   };
   speech.onFirstAudio = (seconds) => showTiming(` · audio ${seconds.toFixed(2)}s`);
   speech.onTrace = (trace) => {
+    providers.showTrace(trace);
     spent += trace.cost ?? 0;
     companionStatus.textContent = `Watching · ${turns} turns · $${spent.toFixed(4)}`;
   };
@@ -117,17 +122,19 @@ export function buildPanel(root: HTMLElement, animator: Animator, speech: Speech
   say.onkeydown = (e) => {
     if (e.key !== 'Enter' || e.isComposing || !say.value.trim()) return;
     logLine(`you: ${say.value}`);
-    void director.say(say.value);
+    director.say(say.value);
     say.value = '';
   };
   const companion = section(
     'Companion',
     el('div', { className: 'row' }, startCompanion),
     el('label', { className: 'file' }, 'How often she comments ', chattiness),
+    monitor.toggle,
     say,
     el('p', { className: 'hint', textContent: 'Share only the window you want her to see: frames go to OpenRouter.' }),
     companionStatus,
     companionTiming,
+    providers.element,
     companionLog,
   );
 
@@ -244,11 +251,34 @@ export function buildPanel(root: HTMLElement, animator: Animator, speech: Speech
   };
   const toggle = (label: string, id: string, on: number, off: number) =>
     check(label, () => (animator.toggles[id] ?? off) === on, (v) => (animator.toggles[id] = v ? on : off));
+  const sharedSide = el('select', { title: 'Which way she looks to see the window you share' });
+  sharedSide.append(
+    ...[['auto', 'Find it automatically'], ['left', 'To her page\'s left'], ['right', 'To her page\'s right']].map(([value, textContent]) => el('option', { value, textContent })),
+  );
+  try {
+    const saved = localStorage.getItem('companion-shared-side');
+    if (saved === 'left' || saved === 'right') sharedSide.value = saved;
+  } catch {
+    // Storage can be blocked; the default still works.
+  }
+  const sharedStatus = el('p', { className: 'hint' });
+  desktopGaze.onStatus = (status) => (sharedStatus.textContent = status);
+  desktopGaze.setSide(sharedSide.value as SharedSide);
+  sharedSide.onchange = () => {
+    desktopGaze.setSide(sharedSide.value as SharedSide);
+    try {
+      localStorage.setItem('companion-shared-side', sharedSide.value);
+    } catch {
+      // Only the choice isn't remembered.
+    }
+  };
   const behaviour = section(
     'Behaviour',
     check('Follow mouse', () => animator.options.followPointer, (v) => (animator.options.followPointer = v)),
     check('Idle motion', () => animator.options.idle, (v) => (animator.options.idle = v)),
     check('Blink', () => animator.options.blink, (v) => (animator.options.blink = v)),
+    el('label', { className: 'check' }, 'Shared window ', sharedSide),
+    sharedStatus,
   );
   const outfit = section(
     'Outfit',
@@ -267,5 +297,5 @@ export function buildPanel(root: HTMLElement, animator: Animator, speech: Speech
   );
 
   const toggleBtn = el('button', { className: 'collapse', textContent: '☰', title: 'Show/hide panel', onclick: () => root.classList.toggle('collapsed') });
-  root.append(toggleBtn, companion, voice, section('Emotion', grid), section('Gesture', actions), talk, behaviour, outfit, view, el('p', { className: 'hint', textContent: 'Click her head for a pat, her body for a poke.' }));
+  root.append(toggleBtn, companion, buildCharacterPanel(), voice, section('Emotion', grid), section('Gesture', actions), talk, behaviour, outfit, view, el('p', { className: 'hint', textContent: 'Click her head for a pat, her body for a poke.' }));
 }

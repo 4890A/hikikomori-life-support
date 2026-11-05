@@ -19,7 +19,9 @@ import httpx
 from PIL import Image
 
 from cues import EMOJI_EMOTIONS, SENTENCE_END, _EMOJI, _spoken_length
-from llm import MAX_REPLY_CHARS, MIN_REPLY_CHARS, SCREEN_RULE, SUMMARY_MARKER, SYSTEM_PROMPT, request_body
+from character import load_card
+from llm import request_body
+from prompts import MAX_REPLY_CHARS, MIN_REPLY_CHARS, SUMMARY_MARKER, build_system_prompt, screen_instruction
 
 ROOT = Path(__file__).resolve().parent.parent
 URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -32,6 +34,9 @@ DEFAULT_MODELS = [
 ]
 RATE_LIMIT_RETRY_SECONDS = 1.0
 IMAGE_WIDTH = 768
+CARD = load_card()
+SYSTEM_PROMPT = build_system_prompt(CARD)
+SCREEN_RULE = screen_instruction(CARD)
 TURNS_PER_HOUR = 300  # One comment every 12 seconds.
 
 SPEECH_TURNS = [

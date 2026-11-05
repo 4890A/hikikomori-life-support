@@ -18,8 +18,23 @@ node_modules/
 assets/
 web/public/model/
 
+# Demo media shows the model, so it stays local too.
+docs/*.mp4
+docs/demo_strip.png
+
 # Local experiments and generated speech
 .scratch/
+
+# Your own settings, voices and logs
+settings.json
+voices/
+logs/
+
+# What she remembers about you, and your edits to her character
+companion-data/
+
+# Installed by scripts/setup-speech-cpp.ps1
+speech-cpp/
 
 # Separate git repositories used by the speech pipeline
 Irodori-TTS/

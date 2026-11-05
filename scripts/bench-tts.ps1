@@ -1,15 +1,17 @@
 # Benchmarks the running TTS server plus lip alignment. Uses the same Python environment as the
 # speech bridge, so the alignment model loads and runs as it does in production.
-#   .\scripts\start-tts.ps1
+#   .\scripts\start-tts-python.ps1
 #   .\scripts\bench-tts.ps1 -Label v4-small-12 -Voice my-voice-latent -Set num_steps=12,t_schedule_mode=sway
 param(
     [Parameter(Mandatory)][string]$Label,
     [int]$Repeats = 8,
     [string]$Url = 'http://127.0.0.1:8088',
-    [string]$Voice = 'my-voice',
+    [string]$Voice,  # The voice in settings.json unless given.
     [string[]]$Set = @()
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'common.ps1')
+if (-not $Voice) { $Voice = (Get-CompanionSettings).voice }
 
 $root = Split-Path -Parent $PSScriptRoot
 $env:HF_HUB_OFFLINE = '1'

@@ -1,20 +1,18 @@
-# Starts the Irodori-TTS server from the local Hugging Face cache with your voice as the default.
-# Pass -Model to pick another downloaded checkpoint, e.g. -Model Irodori-TTS-v4.1-Small-MF.
-# These environment variables override Irodori-TTS-Server/.env for this process only, so the .env
-# file (which may point at another checkpoint) is left alone.
-param([string]$Model = 'Irodori-TTS-v4-Small')
+# Starts speech.cpp on :8088 with the model in settings.json, on the first GPU (Vulkan), or the CPU
+# without one. The speech bridge sets the steps per request. If you pass -Model, give
+# start-speech.ps1 the same one.
+param([string]$Model)
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'common.ps1')
 
-$root = Split-Path -Parent $PSScriptRoot
-$hub = if ($env:HF_HUB_CACHE) { $env:HF_HUB_CACHE } else { Join-Path $env:USERPROFILE '.cache\huggingface\hub' }
-$snapshots = Join-Path $hub "models--Aratako--$Model\snapshots"
-$snapshot = Get-ChildItem $snapshots -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $snapshot) { throw "$Model not found in $snapshots. Download it with: hf download Aratako/$Model" }
+if (-not (Test-Path $SpeechExe)) { throw 'speech.cpp is not set up. Run: .\scripts\setup-speech-cpp.ps1' }
+$settings = Get-CompanionSettings
+if (-not $Model) { $Model = $settings.model }
 
-$env:IRODORI_CHECKPOINT = Join-Path $snapshot.FullName 'model.safetensors'
-$env:IRODORI_DEFAULT_VOICE = 'my-voice'
-$env:IRODORI_PRELOAD = 'true'
-$env:HF_HUB_OFFLINE = '1'
-
-Set-Location (Join-Path $root 'Irodori-TTS-Server')
-uv run --no-sync python -m irodori_openai_tts --host 127.0.0.1 --port 8088
+$arguments = @('serve', $Model, '--device', 'auto', '--port', '8088')
+if (Test-Path $VoicesDir) {
+    foreach ($voice in Get-ChildItem $VoicesDir -Filter '*.voice.gguf' -File) {
+        $arguments += @('--add-voice', "$($voice.Name -replace '\.voice\.gguf$', '')=$($voice.FullName)")
+    }
+}
+& $SpeechExe @arguments

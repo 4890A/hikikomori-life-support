@@ -5,7 +5,6 @@ import httpx
 import pytest
 
 import llm
-from cues import EMOJI_EMOTIONS, clean_spoken
 
 
 def stream(*chunks: dict) -> httpx.Response:
@@ -60,9 +59,14 @@ def test_each_model_gets_its_own_reasoning_setting():
     assert requests[1]["reasoning"] == {"effort": "minimal", "exclude": True}
 
 
-def test_every_request_sorts_providers_by_latency():
+def test_known_models_prefer_proven_providers_but_can_use_others():
     _, requests, _ = run(lambda model: httpx.Response(500, text="down") if model == "main" else stream(text("はい")))
-    assert all(r["provider"] == {"sort": "latency"} for r in requests)
+    assert requests[1]["provider"] == {"order": llm.PROVIDER_ORDER["z-ai/glm-5.3-flash"], "allow_fallbacks": True}
+
+
+def test_other_models_sort_providers_by_latency():
+    _, requests, _ = run(lambda model: httpx.Response(500, text="down") if model == "main" else stream(text("はい")))
+    assert requests[0]["provider"] == {"sort": "latency"}
 
 
 def test_falls_back_when_the_main_model_is_refused():
@@ -98,28 +102,62 @@ def test_reports_when_both_models_fail():
     assert isinstance(error, llm.LLMError)
 
 
-def test_prompt_lists_every_expression_emoji_except_those_left_out():
-    for emoji in EMOJI_EMOTIONS:
-        assert (emoji in llm.SYSTEM_PROMPT) == (emoji not in llm.LEFT_OUT_OF_PROMPT)
+def run_async(handler, seconds=llm.FIRST_TOKEN_SECONDS, complete=False):
+    """Like run, with a handler that can wait, and a chosen limit on the first word."""
+    requests: list[str] = []
+
+    async def record(request: httpx.Request) -> httpx.Response:
+        model = json.loads(request.content)["model"]
+        requests.append(model)
+        return await handler(model)
+
+    async def collect():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(record)) as client:
+            if complete:
+                return await llm.complete(client, [])
+            return [delta async for delta in llm.stream_reply(client, [], llm.StreamInfo(), seconds)]
+
+    return asyncio.run(collect()), requests
 
 
-def test_prompt_gives_every_expression_a_name():
-    assert set(EMOJI_EMOTIONS.values()) <= set(llm.EMOTION_NAMES)
+def test_stalled_main_model_moves_to_the_fallback():
+    async def handler(model):
+        if model == "main":
+            await asyncio.sleep(5)
+        return stream(text("はい"))
+
+    deltas, requests = run_async(handler, seconds=0.05)
+    assert deltas == ["はい"]
+    assert requests == ["main", "z-ai/glm-5.3-flash"]
 
 
-def test_voice_meanings_describe_only_mapped_emoji():
-    assert set(llm.VOICE_MEANINGS) <= set(EMOJI_EMOTIONS)
+def test_the_last_model_may_take_as_long_as_it_needs():
+    async def handler(model):
+        if model == "main":
+            return httpx.Response(500, text="down")
+        await asyncio.sleep(0.2)
+        return stream(text("はい"))
+
+    deltas, _ = run_async(handler, seconds=0.05)
+    assert deltas == ["はい"]
 
 
-def test_voice_only_emoji_have_no_expression():
-    assert not set(llm.VOICE_ONLY_EMOJI) & set(EMOJI_EMOTIONS)
+def test_fast_main_model_is_not_cut_off():
+    async def handler(model):
+        return stream(text("はい"))
+
+    deltas, requests = run_async(handler, seconds=1.0)
+    assert deltas == ["はい"]
+    assert requests == ["main"]
 
 
-def test_prompt_is_not_about_one_kind_of_content():
-    for word in ("麻雀", "牌", "プレイヤー"):
-        assert word not in llm.SYSTEM_PROMPT + llm.SCREEN_RULE + llm.speech_message("x", "y")
+def test_background_work_has_no_first_word_limit(monkeypatch):
+    monkeypatch.setattr(llm, "FIRST_TOKEN_SECONDS", 0.01)
 
+    async def handler(model):
+        await asyncio.sleep(0.1)
+        return stream(text("はい"))
 
-def test_prompt_emoji_survive_parsing_whole():
-    for emoji in [*EMOJI_EMOTIONS, *llm.VOICE_ONLY_EMOJI]:
-        assert clean_spoken(f"{emoji}テスト") == f"{emoji}テスト"
+    text_out, requests = run_async(handler, complete=True)
+    assert text_out == "はい"
+    assert requests == ["main"]

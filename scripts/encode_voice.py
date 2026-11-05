@@ -21,7 +21,7 @@ VOICES = ROOT / "Irodori-TTS-Server" / "voices"
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--voice", default="my-voice", help="Wav name in Irodori-TTS-Server/voices")
+    parser.add_argument("--voice", required=True, help="Wav name in Irodori-TTS-Server/voices, without .wav")
     args = parser.parse_args()
 
     source = VOICES / f"{args.voice}.wav"

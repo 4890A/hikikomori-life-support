@@ -14,18 +14,10 @@ import soundfile as sf
 
 from analysis import TRACK_FPS, PhonemeModel, analyze
 from cues import Emoji, Fragment, build_cues, parse_items
+from tts_request import DEFAULT_VOICE, request_body
 
 logger = logging.getLogger("speech-bridge")
 TTS_URL = os.environ.get("IRODORI_TTS_URL", "http://127.0.0.1:8088")
-# Precomputed by scripts/encode_voice.py: encoding the voice clip per request costs about 470 ms.
-DEFAULT_VOICE = "my-voice-latent"
-# Chosen by ear in the docs/companion-plan.md benchmarks, as the fastest setting that sounded good.
-SYNTHESIS_OPTIONS = {
-    "num_steps": 20,
-    "t_schedule_mode": "sway",
-    "sway_coeff": -1.0,
-    "cfg_guidance_mode": "independent",
-}
 # The server caps a single synthesis at this length; hitting it means speech was probably cut off.
 SYNTHESIS_CAP_SECONDS = 30.0
 # Silence kept around speech when trimming the model's leading and trailing padding.
@@ -107,21 +99,9 @@ async def synthesize_segment(
     speed: float | None = None,
     caption: str | None = None,
 ) -> dict:
-    irodori: dict = {**SYNTHESIS_OPTIONS, "chunking_enabled": False}
-    if seed is not None:
-        irodori["seed"] = seed
-    if caption:
-        irodori["caption"] = caption
-    body: dict = {
-        "model": "irodori-tts",
-        "input": text,
-        "voice": voice,
-        "response_format": "wav",
-        "irodori": irodori,
-    }
-    if speed is not None:
-        body["speed"] = speed
-
+    if not voice:
+        raise TTSError("No voice is set. Put a WAV recording in the voices folder, then run start.ps1.")
+    body = request_body(text, voice, seed, speed, caption)
     started = time.perf_counter()
     try:
         response = await client.post(f"{TTS_URL}/v1/audio/speech", json=body)

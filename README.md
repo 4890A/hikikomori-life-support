@@ -1,46 +1,98 @@
-# DeepSeek-chan animated mascot
+# Live2D screen companion
 
-A browser mascot built on the free **DeepSeek-chan** Live2D model: idle motion, natural
-blinking, mouse-following gaze, talking (text-to-speech, mic or audio-file lip-sync) and a
-set of emotions (happy, excited, embarrassed, flushed, thinking, surprised, sad, love, smug,
-dizzy, pout).
+A Live2D character who watches a window you share, talks about what's happening in Japanese, and answers what you type, with her voice, face and lips in sync. She runs on your own PC, apart from the LLM that writes her replies. It works on games, video, or whatever else is on screen.
 
-![demo frames](docs/demo_strip.png) — full clip: [`docs/demo.mp4`](docs/demo.mp4)
-
-> **Credits** — Illustration & PSD: Kamiya Ryoko (神宫凉子) · Live2D rigging: 霓虹猫_NeonNeko ·
-> distributed free by Kamiya Ryoko ([VGen](https://vgen.co/KAMIYA), X @kamiya_ryoko).
-> The model files are **not** in this repo (redistribution is prohibited by its terms);
-> the setup step extracts them from your downloaded zip. This project only adds animation code.
+> **Character credits:** DeepSeek-chan's illustration and PSD by Kamiya Ryoko (神宫凉子), Live2D rigging by 霓虹猫_NeonNeko, distributed free by [Kamiya Ryoko](https://vgen.co/KAMIYA). This project isn't affiliated with them or with DeepSeek. Her files aren't in this repository, as their terms don't allow reposting. [See who made what.](THIRD_PARTY.md)
 
 ## Setup
 
-Requires [uv](https://docs.astral.sh/uv/) and Node 20+. Put the model zip
-(`DeepSeek-chan … PSD.zip`) in the repo root, then:
+**You need:** Windows 10 or 11, a GPU with Vulkan support, about 10 GB of free disk space, and [Git](https://git-scm.com/download/win). An NVIDIA GPU makes lip sync a little faster. It's been tested on one PC with an RTX 4070, so other hardware is unproven: please report what you find.
+
+**Get ready before you start:**
+
+- **Her model:** download the free zip from [the creator's page](https://vgen.co/KAMIYA/product/deepseek-chan-deepseek-free-live2d-model-layered-psd-psd/1c55a71a-2747-4616-819d-2dc0a934089d) into your Downloads folder. You can also do this when setup asks.
+- **A voice recording:** a WAV file of one person speaking clearly for 10-60 s. She speaks in a voice cloned from it. Only use a voice you have the right to use: Irodori-TTS forbids cloning someone without their consent.
+- **An OpenRouter key (optional):** get one from [openrouter.ai/keys](https://openrouter.ai/keys) and add a few dollars of credit. She costs roughly 4 cents an hour while she's talking. Without a key, she can only speak what you type in the Voice panel.
+
+Then open PowerShell and run:
 
 ```powershell
-uv run live2dselfrigging         # copies the model out of the zip into web/public/model (ASCII names)
-cd web
-npm install
-npm run dev                      # http://localhost:5179
+git clone https://github.com/4890A/Live2DSelfRigging
+cd Live2DSelfRigging
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
-## Speech with emotions (Irodori-TTS)
+The first run downloads 3-8 GB, depending on your GPU, so it can take a while. It's safe to stop and run again, as finished steps are skipped. Setup goes through these steps:
 
-Type Japanese text with [Irodori emoji](Irodori-TTS/irodori_tts/gradio_emoji_palette.py) in the
-**Voice** panel. She says it in the cloned voice, her lips follow the actual audio, and each emoji
-triggers its expression at the matching moment. Run these alongside `npm run dev`:
+| Step | What happens | Needs you? |
+|---|---|---|
+| 1. Check your PC | Checks disk space, and offers to install `uv` (Python) and Node with `winget` if they're missing | Say yes to installing them |
+| 2. Python packages | Installs PyTorch and the speech bridge's packages into `.venv`. NVIDIA PCs get the GPU build, others a smaller CPU build | |
+| 3. Voice engine | Downloads [speech.cpp](https://github.com/nyosegawa/speech.cpp) into `speech-cpp/` and checks it, then the Irodori-TTS voice model (1.9 GB) | |
+| 4. Lip-sync model | Downloads a phoneme model (0.35 GB) from Hugging Face | |
+| 5. Her model | Finds the zip in this folder or your Downloads, and copies what she needs into `web/public/model/`. If it isn't there, setup opens the download page and waits | Download the zip |
+| 6. Her voice | Opens the `voices` folder and waits for your WAV file, then makes her voice from it | Put your WAV file in `voices` and press Enter |
+| 7. Web app | Installs and builds her page | |
+| 8. OpenRouter key | Asks for your key, which stays hidden as you paste it and is saved to your Windows user account. Press Enter to skip | Paste your key |
+| 9. Voice test | Speaks one line, so problems show up now | |
+
+**Setup options:** `-ZipPath <file>` uses a model zip from somewhere else, `-SkipKey` skips the key question, and `-CpuOnly` uses the smaller CPU build of PyTorch even with an NVIDIA GPU.
+
+### Starting and stopping her
 
 ```powershell
-.\scripts\start-tts.ps1      # Irodori-TTS server on :8088: v4 Small, your voice (overrides .env for this process only)
-.\scripts\start-speech.ps1   # speech bridge on :8089 (lip-sync and expression timing)
+powershell -ExecutionPolicy Bypass -File .\start.ps1
 ```
 
-The bridge uses a precomputed voice file, which saves about 470 ms per request. Create it once with:
+This starts the voice engine, the speech bridge and her page, and opens http://localhost:5179 once she's ready, which takes a few seconds while her voice warms up. Press Ctrl+C in that window to stop everything. Add `-NoBrowser` to start her without opening the browser.
 
-```powershell
-$env:HF_HUB_OFFLINE = '1'; uv run --project Irodori-TTS-Server --no-sync python scripts\encode_voice.py
-```
+### If something goes wrong
 
+Run `powershell -ExecutionPolicy Bypass -File .\doctor.ps1`. It checks each part, changes nothing, and suggests a fix for anything wrong. Each service writes a log in `logs/`. Common problems:
+
+- **"Port ... is already in use":** she may still be running from before. Close that PowerShell window, or restart your PC.
+- **"Setup is not finished":** run `setup.ps1` again. It picks up where it stopped.
+- **The voice step keeps failing:** the file must be a real WAV, not an MP3 renamed to `.wav`, and at most 120 s long.
+- **Speech is very slow:** `doctor.ps1` says whether it found a Vulkan GPU. Updating your graphics driver usually fixes it.
+
+### Updating and uninstalling
+
+To update, run `git pull`, then run `setup.ps1` again.
+
+To uninstall, delete this folder, then remove what setup put elsewhere:
+
+- **speech.cpp's model:** `%LOCALAPPDATA%\speech.cpp`.
+- **The lip-sync model:** in `%USERPROFILE%\.cache\huggingface`.
+- **uv's download cache:** several GB of Python packages. Run `uv cache clean` to clear it.
+- **Your key:** run `[Environment]::SetEnvironmentVariable('OPENROUTER_API_KEY', $null, 'User')`.
+
+`uv` and Node, if setup installed them, can be removed from Windows' installed apps.
+
+## Using her
+
+Open http://localhost:5179, click **Start Companion** and pick a window.
+
+**Privacy:** frames from the window you share, and what she remembers about you, are sent to OpenRouter and its model providers. Share only the window you want her to see. Her memory and your character edits stay in `companion-data/` on your PC, and you can delete them from the panel.
+
+- **Her character:** the **Character** section edits her personality, speaking style and rules, and shows the full prompt. The default is `characters/deepseek-chan.json`.
+- **How often she talks:** the Quiet, Normal and Chatty setting.
+- **Where she looks:** she follows your mouse anywhere on the desktop, and looks at the window you share while she's reacting to it. If you share a whole screen or a tab she can't tell where it is, so pick a side under **Behaviour**. These positions stay on your PC.
+- **Her voice:** to change it, run `.\scripts\add-voice.ps1 another-clip.wav`, using only a voice you have the right to use.
+- **Other settings:** `settings.json`, which you can create next to this file, takes `steps`, `durationScale`, `voice` and `model`. A lower `durationScale`, such as 0.7, shortens her lines and helps her react sooner.
+
+## How it fits together
+
+| Port | Service | Does |
+|---|---|---|
+| 5179 | Web app (`web/`) | Her page, screen watching and when she speaks |
+| 8089 | Speech bridge (`speech/`) | Replies from the LLM, lip sync, expressions and memory |
+| 8088 | [speech.cpp](https://github.com/nyosegawa/speech.cpp) | Irodori-TTS voice on Vulkan |
+
+For development, run `.\scripts\start-tts.ps1`, `.\scripts\start-speech.ps1` and `npm run dev` in `web/`.
+
+**Before a release:** run the tests below, then run `setup.ps1` from a fresh clone and check that she speaks and reacts.
+
+## Speech details
 How the timing works (`speech/`):
 
 1. **Segments** (`cues.py`): long text splits at sentence ends only. The bridge synthesizes each
@@ -63,9 +115,14 @@ How the timing works (`speech/`):
 
 **Companion:** with both scripts and `npm run dev` running, click **Start Companion** and pick the
 window to watch. She comments regularly, sooner when more is happening, and answers what you type. The
-dropdown sets how often. It needs `OPENROUTER_API_KEY`, and shared frames go to OpenRouter, so share only that window. See `docs/companion-plan.md`.
+dropdown sets how often. It needs `OPENROUTER_API_KEY`, and shared frames go to OpenRouter, so share only that window.
 
-Tests: `$env:PYTHONPATH="speech"; uv run --project Irodori-TTS-Server --no-sync --with pytest python -m pytest speech/test_cues.py`
+**Character and memory:** the panel's Character section edits who she is, shows what she remembers about you, and
+previews the full prompt. The default card is `characters/deepseek-chan.json`. Your edits and her memory are saved in
+`companion-data/`, which isn't in Git, and her memory is sent to OpenRouter with each reply. The rules her face and voice
+depend on are added by `speech/prompts.py`. See `docs/companion-plan.md`.
+
+Tests: `uv run --no-sync pytest`, and `npm test` in `web/`.
 
 ## Controls
 
@@ -75,7 +132,7 @@ Tests: `$env:PYTHONPATH="speech"; uv run --project Irodori-TTS-Server --no-sync 
   animates without sound; *Mic lip-sync* follows your microphone; or pick an audio file.
 - **Click** her head for a pat (happy) or the top of her face for a startle; clicking her body
   makes her embarrassed. Reactions return to the previous emotion on their own.
-- **6 7** gesture button or key `G` (clip: [`docs/six_seven.mp4`](docs/six_seven.mp4)).
+- **6 7** gesture button or key `G`.
 - Toggles for mouse following, idle motion, blinking, outfit (short skirt, glasses, monocle, fang)
   and view presets (full / upper body / face).
 

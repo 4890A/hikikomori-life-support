@@ -1,0 +1,35 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    # No models or GPU here: real speech is covered by the release checklist in README.md.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --extra cpu
+      - name: Python tests
+        run: uv run --no-sync pytest -q
+        env:
+          PYTHONUTF8: "1"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - name: Scripts parse in Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          Get-ChildItem -Recurse -Filter *.ps1 -Exclude node_modules | ForEach-Object {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors)
+            if ($errors) { throw "$($_.FullName): $errors" }
+          }

@@ -1,17 +1,60 @@
 [project]
 name = "live2dselfrigging"
 version = "0.1.0"
-description = "Animated web mascot for the DeepSeek-chan Live2D model"
+description = "A Live2D companion that watches your screen and talks about it"
 readme = "README.md"
+license = "MIT"
 authors = [
     { name = "4890A", email = "16848266+4890A@users.noreply.github.com" }
 ]
-requires-python = ">=3.13"
-dependencies = []
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "fastapi==0.136.1",
+    "httpx==0.28.1",
+    "huggingface-hub==1.26.0",
+    "librosa==0.11.0",
+    "numpy==2.2.6",
+    "pydantic==2.13.4",
+    "pyopenjtalk-plus",
+    "soundfile==0.13.1",
+    "transformers==5.12.1",
+    "uvicorn==0.46.0",
+]
+
+# Choose one: lip alignment takes about 20 ms a line on an NVIDIA GPU and about 150 ms on a CPU.
+[project.optional-dependencies]
+cu128 = ["torch==2.10.0"]
+cpu = ["torch==2.10.0"]
+
+[dependency-groups]
+dev = ["pytest"]
 
 [project.scripts]
 live2dselfrigging = "live2dselfrigging:main"
 make-motions = "live2dselfrigging.motions:main"
+
+[tool.uv]
+conflicts = [[{ extra = "cu128" }, { extra = "cpu" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", extra = "cu128" },
+    { index = "pytorch-cpu", extra = "cpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["speech"]
+pythonpath = ["speech"]
 
 [build-system]
 requires = ["uv_build>=0.13.5,<0.14.0"]

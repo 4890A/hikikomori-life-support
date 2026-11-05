@@ -1,5 +1,7 @@
 # Real-time screen companion: plan
 
+> This is the working log from building the companion, including paths and tools that have since changed. For setup, see the README.
+
 ## Goal
 
 DeepSeek-chan watches whatever is on your screen and listens to you, then answers out loud with matching Irodori emotion and Live2D expression, as close to instantly as possible.
@@ -207,6 +209,29 @@ Measured live with 8 full turns from a warmed-up bridge, with no browser, speech
 
 **Not verified:** the automatic switch to the Gemini fallback. An invalid model ID is rejected before fallback runs, so it wasn't exercised, though Gemini does accept the same request settings when used as the main model.
 
+### TTS engine: speech.cpp, `irodori-tts-mf` at 6 steps (current default)
+
+You chose `irodori-tts-mf` at 6 steps. On the same 24 new lines it took 0.259 s median, 0.377 s p90 and 0.457 s at worst, with none over 1 s. In 16 live screen turns through the bridge, without a browser, TTS and lip alignment took 0.27 s median and first audio was ready in 1.06 s median, 1.48 s at worst. You listened to it at 6 steps and it sounds fine, unlike an earlier 4-step test of this model in Python. MF takes no sway or guidance settings, so the bridge leaves them out.
+
+Earlier you chose speech.cpp's `irodori-tts` at 20 steps, measured below. `.\scripts\start-speech.ps1 -Steps N` changes the steps, `-Model` must match `start-tts.ps1 -Model`, and `-Engine pytorch` with `start-tts-python.ps1` goes back to Python. Each sentence now goes to TTS alone, because the server would otherwise add 0.9 s between sentences. The first live run gave first audio ready in 0.80-1.28 s on 7 of 8 turns, and 3.42 s on the first, a large screenshot after startup.
+
+Tested [speech.cpp](https://github.com/nyosegawa/speech.cpp) v0.10.1 on Vulkan, with its F16 `v4.1-Small` and the same voice, against PyTorch `v4-Small` with the saved voice. `scripts/bench_tts_fresh.py` sends 24 new lines of varied length, with sway and independent guidance, on the RTX 4070 without a game running. Times are for a complete WAV:
+
+| Engine, steps | Median | p90 | Max | Over 1 s |
+|---|---|---|---|---|
+| speech.cpp, 20 | 0.613 s | 0.941 s | 1.012 s | 1 of 24 |
+| speech.cpp, 16 | 0.502 s | 0.685 s | 0.872 s | 0 of 24 |
+| speech.cpp, 12 | 0.411 s | 0.540 s | 0.695 s | 0 of 24 |
+| speech.cpp, 8 | 0.324 s | 0.442 s | 0.550 s | 0 of 24 |
+| PyTorch, 20 | 1.197 s | 1.424 s | 1.468 s | 15 of 24 |
+| PyTorch, 16 | 0.465 s | 1.111 s | 1.243 s | 4 of 24 |
+| PyTorch, 12 | 0.377 s | 0.465 s | 1.239 s | 1 of 24 |
+
+- **At the default 40 steps (linear schedule):** speech.cpp took 0.951 s median, 1.482 s p90 and 8 of 24 over 1 s. PyTorch took 1.566 s, 1.747 s and 22 of 24. You said the lower-step speech.cpp clips don't sound as good as Python, so choosing between 40 steps on speech.cpp and PyTorch at 20 is waiting on a listening test.
+- **PyTorch's 16 and 12 step numbers are flattering:** those runs repeated lines from earlier passes, so many audio lengths had already been seen. Only the 20-step row is close to a fair comparison, and even it followed one discarded warm pass.
+- **Slow audio lengths:** speech.cpp doesn't show the 0.7 s penalty for new lengths, so this may replace the fixed-duration fix.
+- **Trade-offs:** you found these clips don't sound as good as Python, and more steps may help. speech.cpp also doesn't apply Irodori's SilentCipher watermark.
+
 ### 4. Browser side
 
 Done. Click **Start Companion** in the panel, then pick the game window. The text box sends typed speech turns until the mic exists (Step 5).
@@ -216,6 +241,7 @@ Done. Click **Start Companion** in the panel, then pick the game window. The tex
 - `web/src/companion/clock.ts`: runs the director and screen checks from a Web Worker, because browsers can throttle page timers on hidden pages.
 - `web/src/anim/speech.ts`: `playStream()` also handles `expression` and `trace` lines, and `active` now follows the audio clock, so it stays right when frames stop.
 - `web/src/ui.ts`: the Companion section shows turns, cost, and face and audio timing.
+- `web/src/companion/turnMonitor.ts`: a toggleable overlay with the exact frame she was sent, or your typed words, and live timers for each step: Model, Writing, TTS and Speaking. The TTS timer runs until playback starts, so it includes the trip back to the browser and decoding, not just synthesis.
 
 **Rhythm (after your first play test):** she was too quiet, so the mahjong thresholds were replaced. The delay is seconds of quiet after her last line, chosen by the biggest change seen since her last comment, with a random 0.85-1.25x on each wait. A pixel counts as changed past a difference of 24 out of 255.
 
@@ -238,6 +264,19 @@ Tested in the real page with that clip standing in for a shared window (a small 
 
 Also checked: reacting unprompted to match-end screens, idle comments, a typed turn interrupting another, and Stop.
 
+**Video to speech, measured in the live page on 2026-11-03.** Real game frames on a test stream, timed from the picture changing to audio leaving the page, each after enough quiet to respond at once, so this is close to a best case. No game was running, and the speakers' own delay isn't included.
+
+| Median (p90), seconds | Checking twice a second (20 changes) | Checking every frame (16 changes) |
+|---|---|---|
+| Change noticed | 0.80 (1.29) | 0.06 (0.08) |
+| Face changes | 1.13 (1.73) | 0.44 (0.58) |
+| First sound | 2.78 (3.62) | 1.85 (2.25) |
+| TTS and lip alignment | 1.25 | 1.05 |
+
+The watcher now checks about 30 times a second against the picture from 0.5 s earlier, the gap the thresholds were measured at, and sends the frame at once. A check took about 2 ms on the main thread. On the Mahjong Soul clip she still made 4.8 comments a minute. The trade-off is that a frame can catch an effect before it fills out.
+
+TTS is the biggest remaining delay. The same engine took 0.65 s median with the page closed and 0.74 s with it open, rendering at 118 fps, on benchmark lines. In this replies test, 😲 opened 14 of 20 replies and 🥤 appeared in 11, so the emoji prompt needs another look.
+
 **Not tested:**
 
 - The browser's real window picker and a live game window. The picker can't be automated.
@@ -248,6 +287,40 @@ Also checked: reacting unprompted to match-end screens, idle comments, a typed t
 
 - One reply in about 12 screen turns stalled 4.35 s and had nothing speakable, so only her face changed. The bridge now logs raw replies to diagnose repeats.
 - She often gets the round wrong, such as saying South on East frames.
+
+### Character card and memory
+
+Done. Measured on 2026-11-03: 16 real game-frame changes in the live page, picture change to audio leaving the page, in close to a best case, with no game running.
+
+| Median (p90) | Change noticed | Face changes | First sound |
+|---|---|---|---|
+| Before the card and short openings | 0.06 s (0.08 s) | 0.44 s (0.58 s) | 1.85 s (2.25 s) |
+| With them | 0.05 s (0.07 s) | 0.49 s (0.70 s) | **1.66 s (1.84 s)** |
+
+- `characters/deepseek-chan.json`: the default card. Panel edits go to `companion-data/character.json`, and Reset deletes them.
+- `speech/prompts.py`: adds the emoji rules and summary format the bridge depends on, so a card can't break them. Each message also lists her recent emoji to avoid. Across 16 screen replies she used 24 different emoji, and no opener more than twice.
+- `speech/memory_store.py`: the last 16 messages word for word, a running summary, and up to 30 facts, saved in `companion-data/memory.json`. A background request updates them after 3 things you say or 8 exchanges, so it never delays a reply. Facts come only from what you say, never from her comments or the screen.
+- `speech/llm.py`: providers changed through the day, with DeepSeek's first word taking 7-13 s at one point on default routing. A first word later than 1.5 s moves to the fallback.
+- `speech/provider_check.py`: at startup, and from the panel's Check again button, looks up OpenRouter's reported latency and throughput from the last 30 minutes, then routes to the best-scoring provider. The score combines median, p90 and streaming speed, and near ties go to the cheaper one. These figures cover all of OpenRouter's users and request types, so they aren't a measurement from this machine or of image requests. The panel shows the choice and what actually answered each reply.
+
+**Not tested:** how short openings sound; a real stall switching models live (unit tests only); memory across a long session, where the summary may lose detail.
+
+### Watching and preparing while she speaks
+
+Done. She keeps reading the screen while she talks and prepares her next line in the background, only changing course at a sentence end. Your typed messages fade her voice instead. `web/src/companion/pacing.ts` holds the rules as a pure function, with Vitest tests (`npm test` in `web/`). Only sentences that were heard get remembered, through `POST /companion/commit`.
+
+Measured on 2026-11-04, with no game running and no side-by-side run of the old build:
+
+| Test | Result |
+|---|---|
+| 16 picture changes at random moments while she talked, change to reaction heard | 4.43 s median, 6.67 s p90, 9.38 s worst. By the old rules I estimate about 9 s at the median |
+| Line ready, from the frame being taken | 1.09 s median |
+| Sentences overlapping or cut off, without typing | 0 of 21 |
+| Typed message while she talked, to her reply starting | 0.71 s, one sentence faded |
+| Screen changing every second for 40 s | 7 lines replaced, no overlaps, but she talked almost nonstop |
+| Mahjong Soul clip for 90 s at Normal | 6 lines a minute, talking 59% of the time, pauses of about 3.4 s |
+
+**What limits reaction time is how long sentences are.** The median sentence took 3.46 s at 3.5 characters a second, and only about 45% of a generated clip is sound. `.\scripts\start-speech.ps1 -DurationScale 0.7` shortens the median test line from 4.94 s to 3.46 s, and 0.5 to 2.46 s. The default stays at 1 until you've listened: clips are in `.scratch/bench-duration/`.
 
 ### 5. Your voice
 

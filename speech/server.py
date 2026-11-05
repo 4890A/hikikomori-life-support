@@ -22,20 +22,26 @@ from pydantic import BaseModel, Field
 import synthesis
 from companion import router as companion_router
 from cues import EMOJI_EMOTIONS, split_segments
-from synthesis import DEFAULT_VOICE, TTS_TIMEOUT, TTS_URL, TTSError, get_model, synthesize_segment, warm_up
+from desktop import router as desktop_router
+from provider_check import check_providers
+from synthesis import TTS_TIMEOUT, TTS_URL, TTSError, get_model, synthesize_segment, warm_up
+from tts_request import DEFAULT_VOICE, DURATION_SCALE, ENGINE, MODEL, STEPS
 
 logger = logging.getLogger("speech-bridge")
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    warming = asyncio.create_task(warm_up())
+    # Both run in the background, so the bridge is usable from the start.
+    background = [asyncio.create_task(warm_up()), asyncio.create_task(check_providers())]
     yield
-    warming.cancel()
+    for task in background:
+        task.cancel()
 
 
 app = FastAPI(title="Live2D speech bridge", lifespan=lifespan)
 app.include_router(companion_router)
+app.include_router(desktop_router)
 
 
 class SpeakRequest(BaseModel):
@@ -91,8 +97,14 @@ async def health() -> dict:
         return {"status": "tts_unreachable", "detail": str(exc)}
     return {
         "status": "ok",
+        "engine": ENGINE,
+        "model": MODEL,
+        "steps": STEPS,
+        "duration_scale": DURATION_SCALE,
+        "voice": DEFAULT_VOICE,
         "checkpoint": tts.get("runtime", {}).get("checkpoint"),
-        "tts_loaded": tts.get("runtime", {}).get("loaded"),
+        # speech.cpp only answers once its model is loaded.
+        "tts_loaded": tts.get("runtime", {}).get("loaded", True),
         "warmed_up": synthesis.warmed_up,
     }
 
