@@ -17,8 +17,8 @@ A Live2D character who watches a window you share, talks about what's happening 
 Then open PowerShell and run:
 
 ```powershell
-git clone https://github.com/4890A/Live2DSelfRigging
-cd Live2DSelfRigging
+git clone https://github.com/4890A/hikikomori-life-support
+cd hikikomori-life-support
 powershell -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
