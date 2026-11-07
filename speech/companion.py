@@ -32,13 +32,15 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from acts import BEAT, COMMENT, MOMENT, REPLY, Act, choose_act
 from character import DATA_DIR, CharacterCard, load_card, reset_card, save_card
-from cues import ReplyEvents, ReplyParser
+from cues import LookParser, ReplyEvents, ReplyParser
 from llm import FALLBACK_MODEL, MODEL, LLMError, StreamInfo, complete, stream_reply
 from memory_store import MemoryStore, PendingTurns, parse_update, update_messages
-from prompts import SCREEN_TURN_NOTE, build_system_prompt, screen_message, speech_message
+from prompts import SCREEN_TURN_NOTE, build_system_prompt, context_block, look_message, reply_message
 import provider_check
 from synthesis import TTS_TIMEOUT, TTSError, synthesize_segment
+from timeline import DECLINED, HEARD, SAID, SAME_NOTE, SEEN, TURN, Timeline, similarity
 from tts_request import DEFAULT_VOICE, MIN_SEGMENT_CHARS
 
 logger = logging.getLogger("speech-bridge")
@@ -46,16 +48,29 @@ router = APIRouter(prefix="/companion")
 
 card: CharacterCard = load_card()
 store = MemoryStore(DATA_DIR / "memory.json")
+timeline = Timeline(DATA_DIR / "sessions")
 pending_turns = PendingTurns()
 updating_memory = False
+
+# Why the browser wants a screen line, and so what kind of line it is.
+SOURCE_OF_REASON = {"big change": MOMENT, "some change": COMMENT, "check-in": COMMENT, "idle": BEAT}
+# The interest (0-3) a look needs before she says anything: a big change needs little, a lull none.
+INTEREST_NEEDED = {MOMENT: 1, COMMENT: 2, BEAT: 0}
+# Her last question still counts as open for this long.
+QUESTION_OPEN_SECONDS = 60
+# Events older than this give her something to call back to.
+CALLBACK_AFTER_SECONDS = 60
+# A comment repeating what she noted this recently is declined.
+STALE_WITHIN_SECONDS = 45
 
 
 class TurnRequest(BaseModel):
     kind: Literal["speech", "screen"]
     text: str | None = None
-    image: str | None = None  # Data URL of a JPEG frame.
+    image: str | None = None  # Data URL of a JPEG frame. With speech, the screen as you spoke.
     voice: str = DEFAULT_VOICE
     now_saying: str | None = None  # What she's still saying, if this line will follow it.
+    reason: str | None = None  # Why the browser asked for a screen line: see SOURCE_OF_REASON.
 
 
 class CommitRequest(BaseModel):
@@ -67,13 +82,37 @@ def line(message: dict) -> str:
     return json.dumps(message, ensure_ascii=False) + "\n"
 
 
-def build_messages(request: TurnRequest) -> list[dict]:
-    memory = store.memory
+def _ends_with_question(text: str) -> bool:
+    return any(mark in text[-6:] for mark in ("？", "?"))
+
+
+def pick_act(source: str) -> Act:
+    said = timeline.said(limit=6)
+    now = time.time()
+    asked_last = bool(said) and _ends_with_question(said[-1].text) and now - said[-1].t < QUESTION_OPEN_SECONDS
+    callbacks = [e.t for e in said if e.extra.get("act") == "callback"]
+    old = [e for e in timeline.recent(now) if now - e.t >= CALLBACK_AFTER_SECONDS]
+    return choose_act(
+        source,
+        [e.extra.get("act", "") for e in said],
+        asked_last=asked_last,
+        seconds_since_callback=now - callbacks[-1] if callbacks else float("inf"),
+        has_history=bool(old),
+    )
+
+
+def build_messages(request: TurnRequest, act: Act, threshold: int) -> list[dict]:
+    recent_lines = [e.text for e in timeline.said()]
+    notes = []
+    said = timeline.said(limit=1)
+    if request.kind == "screen" and said and _ends_with_question(said[-1].text) and time.time() - said[-1].t < QUESTION_OPEN_SECONDS:
+        notes.append("あなたのさっきの質問に、きみはまだ答えていない。同じ質問はしない")
+    context = context_block(timeline.render(), timeline.minutes_together(), notes=notes)
     if request.kind == "screen":
-        content: str | list[dict] = screen_message(card, request.image or "", memory.history, request.now_saying)
+        content: str | list[dict] = look_message(card, request.image or "", context, act, threshold, recent_lines, request.now_saying)
     else:
-        content = speech_message(request.text or "", memory.screen_summary, memory.history, request.now_saying)
-    return [{"role": "system", "content": build_system_prompt(card, memory)}, *memory.history, {"role": "user", "content": content}]
+        content = reply_message(request.text or "", context, act, recent_lines, request.now_saying, request.image)
+    return [{"role": "system", "content": build_system_prompt(card, store.memory)}, {"role": "user", "content": content}]
 
 
 async def update_memory() -> None:
@@ -101,17 +140,43 @@ async def update_memory() -> None:
 async def turn_lines(request: TurnRequest) -> AsyncIterator[str]:
     started = time.perf_counter()
     since = lambda: round(time.perf_counter() - started, 3)  # noqa: E731
-    trace: dict = {"type": "trace", "kind": request.kind}
+    is_speech = request.kind == "speech"
+    source = REPLY if is_speech else SOURCE_OF_REASON.get(request.reason or "", COMMENT)
+    act = pick_act(source)
+    threshold = 0 if is_speech else INTEREST_NEEDED[source]
+    trace: dict = {"type": "trace", "kind": request.kind, "source": source, "act": act.key}
     out: asyncio.Queue[str | None] = asyncio.Queue()
     to_speak: asyncio.Queue[str | None] = asyncio.Queue()
-    parser = ReplyParser(MIN_SEGMENT_CHARS)
+    # A comment on what she just saw is a repeat. A big change or a lull may still be worth a line.
+    previous = None if is_speech or source != COMMENT else timeline.last_seen(STALE_WITHIN_SECONDS)
+    is_stale = (lambda seen: similarity(seen, previous.text) >= SAME_NOTE) if previous else None
+    parser: LookParser | ReplyParser = (
+        ReplyParser(MIN_SEGMENT_CHARS) if is_speech else LookParser(threshold, MIN_SEGMENT_CHARS, is_stale=is_stale)
+    )
     info = StreamInfo()
     spoken: list[str] = []
-    is_speech = request.kind == "speech"
-    turn_id = pending_turns.start(request.text if is_speech else SCREEN_TURN_NOTE, is_speech)
-    out.put_nowait(line({"type": "turn", "turn_id": turn_id}))
+    if is_speech:
+        timeline.add(HEARD, request.text or "", typed=True)
+    turn_id = pending_turns.start(request.text if is_speech else SCREEN_TURN_NOTE, is_speech, act=act.key, source=source)
+    out.put_nowait(line({"type": "turn", "turn_id": turn_id, "act": act.key}))
+    looked = {"seen": False, "declined": False}
+
+    def report_look() -> None:
+        """What she saw goes on the timeline whether or not she speaks, so she remembers it."""
+        if not isinstance(parser, LookParser):
+            return
+        if parser.observation and parser.decided and not looked["seen"]:
+            looked["seen"] = True
+            timeline.add(SEEN, parser.observation, interest=parser.interest)
+            out.put_nowait(line({"type": "seen", "text": parser.observation, "interest": parser.interest}))
+        if parser.declined and not looked["declined"]:
+            looked["declined"] = True
+            trace["declined"] = True
+            timeline.add(DECLINED, parser.observation or "", interest=parser.interest, needed=threshold)
+            out.put_nowait(line({"type": "declined", "interest": parser.interest}))
 
     def apply(events: ReplyEvents) -> None:
+        report_look()
         if events.emoji is not None:
             trace.setdefault("expression", since())
             out.put_nowait(line({"type": "expression", "emotion": events.emoji.emotion, "emoji": events.emoji.char}))
@@ -123,14 +188,18 @@ async def turn_lines(request: TurnRequest) -> AsyncIterator[str]:
 
     async def read_llm(client: httpx.AsyncClient) -> None:
         try:
-            async for delta in stream_reply(client, build_messages(request), info):
+            raw: list[str] = []
+            async for delta in stream_reply(client, build_messages(request, act, threshold), info):
                 if "first_token" not in trace:
                     trace["first_token"] = since()
                     out.put_nowait(line({"type": "stage", "stage": "writing"}))
+                raw.append(delta)
                 apply(parser.feed(delta))
                 if parser.finished:
                     break
             apply(parser.finish())
+            report_look()
+            logger.info("raw reply (%s): %s", act.key, "".join(raw).replace("\n", " | "))
         finally:
             to_speak.put_nowait(None)
 
@@ -139,6 +208,7 @@ async def turn_lines(request: TurnRequest) -> AsyncIterator[str]:
         while (text := await to_speak.get()) is not None:
             segment = await synthesize_segment(client, text, request.voice)
             trace.setdefault("first_audio_ready", since())
+            pending_turns.add_written(turn_id, text, segment["duration"])
             spoken.append(text)
             out.put_nowait(line({"type": "segment", "index": index, "count": None, **segment}))
             index += 1
@@ -157,7 +227,10 @@ async def turn_lines(request: TurnRequest) -> AsyncIterator[str]:
             trace["model"] = info.model
             trace["provider"] = info.provider
             trace["cost"] = info.usage.get("cost")
-            logger.info("companion turn %s, spoken %s, summary %s", trace, spoken, parser.summary)
+            if isinstance(parser, LookParser):
+                trace["interest"] = parser.interest
+            logger.info("companion turn %s, spoken %s", trace, spoken)
+            timeline.add(TURN, **{("turn_kind" if k == "kind" else k): v for k, v in trace.items() if k != "type"})
             out.put_nowait(line(trace))
             out.put_nowait(line({"type": "done"}))
         except (LLMError, TTSError) as exc:
@@ -174,7 +247,7 @@ async def turn_lines(request: TurnRequest) -> AsyncIterator[str]:
             yield message
     finally:
         task.cancel()
-        pending_turns.set_summary(turn_id, parser.summary)
+        pending_turns.set_summary(turn_id, parser.observation if isinstance(parser, LookParser) else None)
 
 
 @router.post("/turn")
@@ -189,10 +262,26 @@ async def turn(request: TurnRequest) -> StreamingResponse:
 @router.post("/commit")
 async def commit_turn(request: CommitRequest) -> dict:
     """Remembers the sentences of a reply that were actually heard."""
-    saved = pending_turns.commit(request.turn_id, request.spoken, store)
-    if saved and request.spoken:
+    turn = pending_turns.commit(request.turn_id, request.spoken, store)
+    if turn and request.spoken:
+        written = turn["written"]
+        timeline.add(
+            SAID,
+            "".join(request.spoken),
+            act=turn.get("act"),
+            source=turn.get("source"),
+            seconds=round(sum(written.get(text, 0.0) for text in request.spoken), 2),
+            cut=len(request.spoken) < len(written),
+        )
         asyncio.ensure_future(update_memory())
-    return {"saved": saved}
+    return {"saved": turn is not None}
+
+
+@router.post("/session/start")
+async def start_session() -> dict:
+    """Begins a new session log, for a fresh start or a replay test."""
+    timeline.new_session()
+    return {"log": timeline.path.name if timeline.path else None}
 
 
 @router.get("/providers")

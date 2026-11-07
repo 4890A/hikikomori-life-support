@@ -67,6 +67,12 @@ export class PreparedLine {
   /** Set once it can't make any more sound. */
   finished = false;
   expression: { emotion: string; emoji: string } | null = null;
+  /** What she noted on screen before deciding whether to speak. */
+  seen: string | null = null;
+  /** She looked and chose to stay quiet. */
+  declined = false;
+  /** The kind of line the bridge asked for, such as a question or a reaction. */
+  act: string | null = null;
   /** Ready to play, but not scheduled yet. */
   decoded: { segment: SpeechSegment; buffer: AudioBuffer }[] = [];
   scheduled: Scheduled[] = [];
@@ -373,7 +379,12 @@ export class SpeechPlayer {
         if (!raw.trim()) continue;
         const message = JSON.parse(raw);
         if (message.type === 'error') throw new Error(message.message);
-        if (message.type === 'turn') line.turnId = message.turn_id;
+        if (message.type === 'turn') {
+          line.turnId = message.turn_id;
+          line.act = message.act ?? null;
+        }
+        if (message.type === 'seen') line.seen = message.text;
+        if (message.type === 'declined') line.declined = true;
         if (message.type === 'trace') this.onTrace?.(message as TurnTrace);
         if (message.type === 'stage') {
           if (message.stage === 'writing') line.stages.writing ??= performance.now();

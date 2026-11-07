@@ -72,11 +72,11 @@ To uninstall, delete this folder, then remove what setup put elsewhere:
 
 Open http://localhost:5179, click **Start Companion** and pick a window.
 
-**Privacy:** frames from the window you share, and what she remembers about you, are sent to OpenRouter and its model providers. Share only the window you want her to see. Her memory and your character edits stay in `companion-data/` on your PC, and you can delete them from the panel.
+**Privacy:** frames from the window you share, and what she remembers about you, are sent to OpenRouter and its model providers. Share only the window you want her to see. Her memory, your character edits and a text log of each session (what she noted on screen, what you said and what she said, with no images or audio) stay in `companion-data/` on your PC, and you can delete them from the panel.
 
 - **Her character:** the **Character** section edits her personality, speaking style and rules, and shows the full prompt. The default is `characters/deepseek-chan.json`.
 - **How often she talks:** the Quiet, Normal and Chatty setting.
-- **Where she looks:** she follows your mouse anywhere on the desktop, and looks at the window you share while she's reacting to it. If you share a whole screen or a tab she can't tell where it is, so pick a side under **Behaviour**. These positions stay on your PC.
+- **Where she looks:** she follows your mouse anywhere on the desktop, and looks at the window you share while she's reacting to it. If you share a whole screen or a tab she can't tell where it is, so pick a side under **Behaviour**. Drag her window around and she sways with it, hair and all. These positions stay on your PC.
 - **Her voice:** to change it, run `.\scripts\add-voice.ps1 another-clip.wav`, using only a voice you have the right to use.
 - **Other settings:** `settings.json`, which you can create next to this file, takes `steps`, `durationScale`, `voice` and `model`. A lower `durationScale`, such as 0.7, shortens her lines and helps her react sooner.
 
@@ -89,6 +89,8 @@ Open http://localhost:5179, click **Start Companion** and pick a window.
 | 8088 | [speech.cpp](https://github.com/nyosegawa/speech.cpp) | Irodori-TTS voice on Vulkan |
 
 For development, run `.\scripts\start-tts.ps1`, `.\scripts\start-speech.ps1` and `npm run dev` in `web/`.
+
+**Tuning how she talks:** `scripts/session_report.py` sums up a session from its log: how much of the time she talked, the gaps, the kinds of line, how often she stayed quiet, repeats, delays and cost. `.\scripts\replay.ps1 -Video clip.mp4 -Minutes 3 -Say '20=what is this?'` plays a video to her as if it were a shared window, in a throwaway Chrome, with lines of yours at set times, then prints that report, so you can compare prompt and timing changes without playing. Start her first, ideally with `$env:COMPANION_DATA_DIR` set to a scratch folder so replays stay out of her memory. The design is in `docs/companion-v2-plan.md`.
 
 **Before a release:** run the tests below, then run `setup.ps1` from a fresh clone and check that she speaks and reacts.
 

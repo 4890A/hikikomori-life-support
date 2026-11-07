@@ -6,7 +6,8 @@ import prompts
 from character import CharacterCard, DEFAULT_CARD
 from cues import EMOJI_EMOTIONS, clean_spoken, parse_items, Emoji
 from memory_store import MAX_FACTS, MAX_HISTORY_MESSAGES, Memory, MemoryStore, PendingTurns, parse_update, update_messages
-from prompts import build_system_prompt, recent_emoji, screen_message, speech_message
+from acts import ACTS
+from prompts import build_system_prompt, look_message, recent_emoji, reply_message
 
 CARD = CharacterCard.model_validate(json.loads(DEFAULT_CARD.read_text(encoding="utf-8")))
 
@@ -40,10 +41,9 @@ def test_prompt_emoji_survive_parsing_whole():
 
 
 def test_default_card_is_not_about_one_kind_of_content():
-    text = build_system_prompt(CARD) + prompts.screen_instruction(CARD) + speech_message("x", "y", [])
+    text = build_system_prompt(CARD) + look_message(CARD, "data:,", "", ACTS["opinion"], 2, [])[0]["text"] + reply_message("x", "", ACTS["reply"], [])
     for word in ("麻雀", "牌", "プレイヤー"):
         assert word not in text
-
 
 def test_default_card_examples_use_only_offered_emoji_and_open_with_a_face():
     offered = {*EMOJI_EMOTIONS, *prompts.VOICE_ONLY_EMOJI} - prompts.LEFT_OUT_OF_PROMPT
@@ -83,35 +83,45 @@ def test_memory_comes_after_the_parts_that_rarely_change():
     assert prompt.index("😊") < prompt.index("名前はアレックス") < prompt.index("一緒に動画を見た")
 
 
-def test_screen_message_always_asks_for_the_summary_the_bridge_reads():
+def test_look_message_asks_for_what_the_bridge_reads_in_order():
     card = CharacterCard(name="テスト子", screen_instruction="好きに話して")
-    content = screen_message(card, "data:image/jpeg;base64,x", [])
-    assert "好きに話して" in content[0]["text"] and prompts.SUMMARY_MARKER in content[0]["text"]
+    content = look_message(card, "data:image/jpeg;base64,x", "文脈", ACTS["question"], 2, [])
+    text = content[0]["text"]
+    assert "好きに話して" in text and "文脈" in text and "質問" in text
+    assert text.index("見たもの:") < text.index("気になる度:") < text.index("セリフ:")
+    assert "2未満なら「なし」" in text
     assert content[1]["image_url"]["url"] == "data:image/jpeg;base64,x"
 
 
-def test_recent_emoji_come_from_her_latest_replies_only():
-    history = [{"role": "assistant", "content": f"{e}ね"} for e in ("🎉", "😲", "😏", "🤭")]
-    history.insert(1, {"role": "user", "content": "🥺だよ"})
-    assert recent_emoji(history) == ["😲", "😏", "🤭"]
+def test_a_line_that_must_be_said_has_no_way_out():
+    text = look_message(CARD, "data:,", "", ACTS["smalltalk"], 0, [])[0]["text"]
+    assert "なし" not in text.split("セリフ:")[1]
+
+
+def test_recent_emoji_come_from_her_latest_lines_only():
+    assert recent_emoji([f"{e}ね" for e in ("🎉", "😲", "😏", "🤭")]) == ["😲", "😏", "🤭"]
 
 
 def test_recent_emoji_keep_joined_emoji_whole_and_unrepeated():
-    history = [{"role": "assistant", "content": "😮‍💨はあ😮‍💨"}]
-    assert recent_emoji(history) == ["😮‍💨"]
+    assert recent_emoji(["😮‍💨はあ😮‍💨"]) == ["😮‍💨"]
 
 
 def test_messages_ask_her_to_avoid_recent_emoji():
-    history = [{"role": "assistant", "content": "😲わあ"}]
-    assert "😲" in speech_message("x", None, history)
-    assert "😲" in screen_message(CARD, "data:image/jpeg;base64,x", history)[0]["text"]
-    assert "最近" not in speech_message("x", None, [])
+    assert "😲" in reply_message("x", "", ACTS["reply"], ["😲わあ"])
+    assert "😲" in look_message(CARD, "data:,", "", ACTS["opinion"], 2, ["😲わあ"])[0]["text"]
+    assert "最近" not in reply_message("x", "", ACTS["reply"], [])
 
 
-def test_speech_message_includes_the_screen_when_known():
-    assert "東1局" in speech_message("x", "東1局", [])
-    assert "直前の画面" not in speech_message("x", None, [])
+def test_a_reply_carries_the_screen_when_given():
+    content = reply_message("これ何？", "", ACTS["reply"], [], image_url="data:image/jpeg;base64,x")
+    assert "これ何？" in content[0]["text"] and content[1]["image_url"]["url"] == "data:image/jpeg;base64,x"
+    assert isinstance(reply_message("x", "", ACTS["reply"], []), str)
 
+
+def test_context_shows_the_timeline_and_notes():
+    text = prompts.context_block("- 10秒前 見た: 猫", 23, notes=["まだ答えていない"])
+    assert "23分目" in text and "見た: 猫" in text and "（まだ答えていない）" in text
+    assert "まだ何もない" in prompts.context_block("", 0)
 
 @pytest.fixture
 def store(tmp_path):
@@ -197,20 +207,19 @@ def test_unreadable_memory_is_kept_aside_not_overwritten(tmp_path):
 
 
 def test_next_line_is_told_what_she_is_still_saying():
-    screen = screen_message(CARD, "data:image/jpeg;base64,x", [], now_saying="😲うわ、すごい！")[0]["text"]
-    speech = speech_message("ねえ", None, [], now_saying="😲うわ、すごい！")
+    screen = look_message(CARD, "data:,", "", ACTS["opinion"], 2, [], now_saying="😲うわ、すごい！")[0]["text"]
+    speech = reply_message("ねえ", "", ACTS["reply"], [], now_saying="😲うわ、すごい！")
     for text in (screen, speech):
         assert "「😲うわ、すごい！」と話している途中" in text
 
 
 def test_no_note_when_she_is_not_mid_line():
-    assert "話している途中" not in speech_message("ねえ", None, [])
-    assert "話している途中" not in screen_message(CARD, "data:image/jpeg;base64,x", [])[0]["text"]
+    assert "話している途中" not in reply_message("ねえ", "", ACTS["reply"], [])
+    assert "話している途中" not in look_message(CARD, "data:,", "", ACTS["opinion"], 2, [])[0]["text"]
 
 
 def test_next_line_avoids_the_emoji_she_is_using_right_now():
-    assert "最近使った絵文字: 😲" in speech_message("ねえ", None, [], now_saying="😲うわ")
-
+    assert "最近使った絵文字: 😲" in reply_message("ねえ", "", ACTS["reply"], [], now_saying="😲うわ")
 
 def test_a_discarded_line_is_never_remembered(store):
     turns = PendingTurns()

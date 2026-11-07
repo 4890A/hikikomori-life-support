@@ -18,6 +18,8 @@ const START_PREPARE_SECONDS = 1.5;
 const PREPARE_MARGIN_SECONDS = 0.3;
 const ESTIMATE_WEIGHT = 0.3;
 const FAILURE_BACKOFF_MS = 2000;
+// After she looks and finds nothing worth saying, before looking again.
+const DECLINED_BACKOFF_MS = 5000;
 
 interface Upcoming {
   line: PreparedLine;
@@ -45,6 +47,9 @@ export class Director {
   userSpeaking = false;
   /** How many prepared lines were thrown away for fresher ones, for the panel. */
   replacedCount = 0;
+  /** How many times she looked and chose to say nothing, and what she saw last time. */
+  declinedCount = 0;
+  lastSeen: string | null = null;
 
   private watcher: ScreenWatcher | null = null;
   private upcoming: Upcoming | null = null;
@@ -102,7 +107,9 @@ export class Director {
   /** Your words come first: her reply starts as soon as it's ready, and her voice fades into it. */
   say(text: string) {
     this.dropUpcoming();
-    const line = this.speech.prepare(TURN_URL, { kind: 'speech', text }, { reason: 'you spoke', frame: null, said: text });
+    // The screen as you spoke, so she can answer 「これ何？」 ("What's this?").
+    const image = this.watcher?.frame();
+    const line = this.speech.prepare(TURN_URL, { kind: 'speech', text, image }, { reason: 'you spoke', frame: image ?? null, said: text });
     this.upcoming = { line, urgent: true, fromUser: true, pause: 0 };
     this.update();
   }
@@ -171,7 +178,7 @@ export class Director {
     this.rollJitter();
     const frame = this.watcher.frame();
     const nowSaying = this.speech.saying || undefined;
-    const line = this.speech.prepare(TURN_URL, { kind: 'screen', image: frame, now_saying: nowSaying }, { reason, frame, said: null });
+    const line = this.speech.prepare(TURN_URL, { kind: 'screen', image: frame, now_saying: nowSaying, reason }, { reason, frame, said: null });
     this.upcoming = { line, urgent, fromUser: false, pause };
   }
 
@@ -196,8 +203,12 @@ export class Director {
     const line = this.upcoming?.line;
     if (line && (line.failed || line.empty)) {
       if (line.failed) this.onProblem?.(line.error);
+      if (line.declined) {
+        this.declinedCount += 1;
+        this.lastSeen = line.seen;
+      }
       this.upcoming = null;
-      this.backoffUntil = performance.now() + FAILURE_BACKOFF_MS;
+      this.backoffUntil = performance.now() + (line.declined ? DECLINED_BACKOFF_MS : FAILURE_BACKOFF_MS);
     }
   }
 

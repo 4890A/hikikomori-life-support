@@ -27,7 +27,7 @@ class CharacterCard(BaseModel):
     dislikes: list[str] = Field(default_factory=list, max_length=30)
     rules: list[str] = Field(default_factory=list, max_length=30)
     examples: list[str] = Field(default_factory=list, max_length=20)
-    screen_instruction: str = Field(default="今の画面を見て、一言反応してください。", min_length=1, max_length=1000)
+    screen_instruction: str = Field(default="画面で変わったところや意外なところに反応する。前と同じことは言わない。", min_length=1, max_length=1000)
 
 
 def _read(path: Path) -> CharacterCard:

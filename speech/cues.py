@@ -6,6 +6,7 @@ No audio or ML dependencies, so the timing rules can be unit tested on their own
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 # Irodori's emoji (see Irodori-TTS/irodori_tts/gradio_emoji_palette.py) plus common extras, mapped
@@ -358,6 +359,163 @@ class ReplyParser:
             return None
         emoji = Emoji(match.group(0))
         return emoji if emoji.emotion is not None else None
+
+OBSERVATION_LABEL, INTEREST_LABEL, LINE_LABEL = "見たもの", "気になる度", "セリフ"
+_LABELS = (OBSERVATION_LABEL, INTEREST_LABEL, LINE_LABEL)
+_LABEL_LINE = re.compile(r"^(見たもの|気になる度|セリフ)\s*[:：]\s*(.*)$", re.S)
+_DIGIT = re.compile(r"[0-9０-９]")
+_NOTHING = ("なし", "（なし）", "(なし)", "無し")
+OBSERVATION_MAX_CHARS = 40
+
+
+def _strip_decoration(text: str) -> str:
+    """Models sometimes bold or bullet the labels: "**見たもの**:", "- セリフ:"."""
+    return text.replace("*", "").lstrip(" \t-・#>")
+
+
+def _could_be_label(text: str) -> bool:
+    text = _strip_decoration(text)
+    return any(label.startswith(text[: len(label)]) for label in _LABELS)
+
+
+class LookParser:
+    """Reads a look-first reply: 見たもの (what she sees), 気になる度 (interest 0-3), then セリフ (the line).
+
+    Only the line is spoken. A reply below the interest bar, with 「なし」 as its line, or with no line at
+    all is declined. A reply that skips the labels and starts talking is spoken as it is.
+    """
+
+    def __init__(
+        self, threshold: int, min_segment_chars: int = MIN_STREAM_SEGMENT_CHARS, is_stale: Callable[[str], bool] | None = None
+    ) -> None:
+        """is_stale: says whether what she sees is what she already saw, which declines the look."""
+        self.reply = ReplyParser(min_segment_chars)
+        self.threshold = threshold
+        self._is_stale = is_stale
+        self.observation: str | None = None
+        self.interest: int | None = None
+        self.declined = False
+        self._buffer = ""
+        self._in_line = False
+        self._line_started = False
+        self._hold = ""
+
+    @property
+    def finished(self) -> bool:
+        return self.declined or self.reply.finished
+
+    @property
+    def decided(self) -> bool:
+        """She has rated what she saw, started her line, or stopped."""
+        return self.interest is not None or self._in_line or self.finished
+
+    def feed(self, delta: str) -> ReplyEvents:
+        if self.finished:
+            return ReplyEvents()
+        if self._in_line:
+            return self._feed_line(delta)
+        self._buffer += delta
+        return self._scan(final=False)
+
+    def finish(self) -> ReplyEvents:
+        if self.finished:
+            return ReplyEvents()
+        events = ReplyEvents()
+        if not self._in_line:
+            events = self._scan(final=True)
+        if self._in_line and not self.declined and self._hold:
+            held = self._feed_line("", final=True)
+            events.emoji = events.emoji or held.emoji
+            events.segments += held.segments
+        if self._in_line and not self.declined and not self.reply.finished:
+            more = self.reply.finish()
+            events.emoji = events.emoji or more.emoji
+            events.segments += more.segments
+        if not self._line_started:
+            self.declined = True
+        return events
+
+    def _scan(self, final: bool) -> ReplyEvents:
+        while not self._in_line and not self.declined:
+            stripped = self._buffer.lstrip()
+            if stripped and not _could_be_label(stripped):
+                # The model skipped the labels and is simply talking.
+                self._in_line = True
+                text, self._buffer = self._buffer, ""
+                return self._feed_line(text)
+            newline = self._buffer.find("\n")
+            if newline < 0:
+                match = _LABEL_LINE.match(_strip_decoration(stripped))
+                if match and match.group(1) == LINE_LABEL and match.group(2).strip():
+                    # Start speaking without waiting for the end of the line.
+                    self._buffer = ""
+                    return self._start_line(match.group(2))
+                if not final or not stripped:
+                    return ReplyEvents()
+                line, self._buffer = self._buffer, ""
+            else:
+                line, self._buffer = self._buffer[:newline], self._buffer[newline + 1 :]
+            events = self._label(line)
+            if events is not None:
+                return events
+        return ReplyEvents()
+
+    def _label(self, line: str) -> ReplyEvents | None:
+        match = _LABEL_LINE.match(_strip_decoration(line.strip()))
+        if not match:
+            return None
+        label, value = match.group(1), match.group(2).strip()
+        if label == OBSERVATION_LABEL:
+            self.observation = value[:OBSERVATION_MAX_CHARS] or None
+            # Models rate an unchanged screen as interesting again, so this isn't left to them.
+            if self.observation and self._is_stale and self._is_stale(self.observation):
+                self.declined = True
+        elif label == INTEREST_LABEL:
+            digit = _DIGIT.search(value)
+            if digit:
+                self.interest = int(digit.group(0).translate(str.maketrans("０１２３４５６７８９", "0123456789")))
+                if self.interest < self.threshold:
+                    self.declined = True
+        elif label == LINE_LABEL:
+            return self._start_line(value)
+        return None
+
+    def _start_line(self, text: str) -> ReplyEvents:
+        self._in_line = True
+        rest, self._buffer = self._buffer, ""
+        if not text.strip():
+            # 「セリフ:」 alone on its row: the line is on the next one.
+            text = rest
+        elif rest:
+            # The label's row already ended, and so did the line.
+            text += "\n"
+        return self._feed_line(text)
+
+    def _feed_line(self, text: str, final: bool = False) -> ReplyEvents:
+        if not self._line_started:
+            text = (self._hold + text).lstrip()
+            self._hold = ""
+            if not text:
+                return ReplyEvents()
+            # 「なし」 can arrive as 「な」 then 「し」, so wait while it could still become one.
+            if not final and any(nothing.startswith(text) for nothing in _NOTHING):
+                self._hold = text
+                return ReplyEvents()
+            if text.startswith(_NOTHING):
+                self.declined = True
+                return ReplyEvents()
+        # The line is one line: anything after a newline is the model carrying on with something else.
+        newline = text.find("\n")
+        spoken = text if newline < 0 else text[:newline]
+        if spoken.strip():
+            self._line_started = True
+        events = self.reply.feed(spoken)
+        if newline >= 0 and self._line_started:
+            more = self.reply.finish()
+            events.emoji = events.emoji or more.emoji
+            events.segments += more.segments
+        return events
+
 
 def _first_onset(spans: list[tuple[float, float]], after: float, before: float) -> float | None:
     """Start of the first voiced span beginning inside (after, before)."""

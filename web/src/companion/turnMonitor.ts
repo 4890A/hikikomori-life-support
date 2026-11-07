@@ -76,13 +76,12 @@ export function buildTurnMonitor(speech: SpeechPlayer, director: Director) {
     const line = speech.line;
     if (line !== shownNow) {
       shownNow = line;
-      if (line) {
-        showImage(nowImage, line.info.frame);
-        nowNote.hidden = line.info.frame !== null;
-        nowNote.textContent = line.info.frame ? '' : `You said: ${line.info.said ?? ''} (sent as text, with no image)`;
-      }
+      if (line) showImage(nowImage, line.info.frame);
     }
     if (line) {
+      const notes = [line.act && `Act: ${line.act}`, line.info.said && `You said: ${line.info.said}`, line.seen && `Saw: ${line.seen}`];
+      nowNote.textContent = notes.filter(Boolean).join(' · ');
+      nowNote.hidden = !nowNote.textContent;
       const speaking = speech.active;
       const values = stepTimes(line, now);
       const currentStep = values.reduce<number>((found, value, i) => (value === null ? found : i), 0);
@@ -103,7 +102,11 @@ export function buildTurnMonitor(speech: SpeechPlayer, director: Director) {
       showImage(nextImage, next?.info.frame ?? null);
     }
     nextStatus.textContent = next ? `Up next: ${waitingOn(next)} (${next.info.reason}), ${((now - next.requestedAt) / 1000).toFixed(1)} s` : 'Up next: nothing yet';
-    replaced.textContent = director.replacedCount > 0 ? `Replaced for fresher lines: ${director.replacedCount}` : '';
+    const notes = [
+      director.replacedCount > 0 ? `Replaced for fresher lines: ${director.replacedCount}` : '',
+      director.declinedCount > 0 ? `Stayed quiet: ${director.declinedCount} (last saw: ${director.lastSeen ?? '?'})` : '',
+    ];
+    replaced.textContent = notes.filter(Boolean).join(' · ');
   };
 
   window.setInterval(() => {
