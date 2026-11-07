@@ -113,7 +113,24 @@ def _avoid_note(recent_lines: list[str], now_saying: str | None = None) -> str:
     if lines:
         quoted = "".join(f"「{line}」" for line in lines[-RECENT_EMOJI_REPLIES:])
         note += f"\n（最近のあなたのセリフ: {quoted}。同じ内容や同じネタは言わない）"
+    habits = repeated_habits(lines)
+    if habits:
+        note += f"\n（最近「{'」「'.join(habits)}」ばかり使っている。今回は使わず、別の言い方にする）"
     return note
+
+
+# Sentence endings and openers she leans on. Two of her last four lines using one is a habit.
+ENDINGS = ("じゃん", "でしょ", "だよ", "かも", "だね", "よね", "かな")
+OPENERS = ("わ", "うわ", "え", "お", "あ", "へえ", "ふーん")
+HABIT_LINES = 4
+
+
+def repeated_habits(lines: list[str]) -> list[str]:
+    recent = [_EMOJI.sub("", line) for line in lines[-HABIT_LINES:]]
+    habits = [e for e in ENDINGS if sum(line.count(e) for line in recent) >= 2]
+    starts = [line.lstrip("、。！？!? ") for line in recent]
+    habits += [f"{o}、" for o in OPENERS if sum(1 for s in starts if s.startswith(o + "、") or s.startswith(o + "！")) >= 2]
+    return habits
 
 
 def _saying_note(now_saying: str | None) -> str:

@@ -168,9 +168,9 @@ def test_a_session_transcript_skips_repeated_notes_and_quiet_sessions_are_not_ep
 
 
 def test_an_episode_is_only_made_from_a_usable_reply():
-    data = {"title": "猫の動画", "summary": "猫を見た", "highlights": ["寝顔", 3, ""], "her": ["猫派"]}
+    data = {"title": "猫の動画", "summary": "猫を見た", "highlights": ["寝顔", 3, ""], "her": ["わたしは猫派", "きみは犬派", "かわいい"]}
     made = episode_from(data, "x.jsonl", 1.0, 2.0)
-    assert made["highlights"] == ["寝顔"] and made["her"] == ["猫派"] and made["log"] == "x.jsonl"
+    assert made["highlights"] == ["寝顔"] and made["her"] == ["わたしは猫派"] and made["log"] == "x.jsonl"
     assert episode_from({"title": "x"}, "x.jsonl", 1.0, 2.0) is None
 
 

@@ -69,6 +69,8 @@ QUESTION_OPEN_SECONDS = 60
 CALLBACK_AFTER_SECONDS = 60
 # A comment repeating what she noted this recently is declined.
 STALE_WITHIN_SECONDS = 45
+# A big change this soon after her last reaction is treated as an ordinary comment.
+MOMENT_SPACING_SECONDS = 30
 
 
 class TurnRequest(BaseModel):
@@ -220,6 +222,11 @@ async def turn_lines(request: TurnRequest) -> AsyncIterator[str]:
     since = lambda: round(time.perf_counter() - started, 3)  # noqa: E731
     is_speech = request.kind == "speech"
     source = REPLY if is_speech else SOURCE_OF_REASON.get(request.reason or "", COMMENT)
+    # Videos change so much that every look would be a "big moment" and every line a reaction.
+    # Soon after a reaction, a big change gets an ordinary comment, which she can also decline.
+    said = timeline.said(limit=1)
+    if source == MOMENT and said and said[-1].extra.get("act") == "reaction" and time.time() - said[-1].t < MOMENT_SPACING_SECONDS:
+        source = COMMENT
     act = pick_act(source)
     threshold = 0 if is_speech else INTEREST_NEEDED[source]
     trace: dict = {"type": "trace", "kind": request.kind, "source": source, "act": act.key}

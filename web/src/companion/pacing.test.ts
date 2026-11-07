@@ -14,6 +14,10 @@ const state = (overrides: Partial<PacingState> = {}): PacingState => ({
   backingOff: false,
   delays: CHATTINESS.normal,
   jitter: 1,
+  talkShare: 0,
+  lastLineSeconds: 0,
+  unpromptedRun: 0,
+  askedYou: false,
   ...overrides,
 });
 
@@ -25,13 +29,13 @@ describe('preparing her next line', () => {
   });
 
   it('starts early enough for the next line to follow on time', () => {
-    // 3 s pause after a line ending in 0: start preparing 1.5 s before it would begin.
-    expect(nextAction(state({ quietFor: 1.4, peak: SOME_CHANGE })).type).toBe('wait');
-    expect(nextAction(state({ quietFor: 1.6, peak: SOME_CHANGE })).type).toBe('prepare');
+    // A 4.5 s pause (2.5 s breath + 2 s for a moderate change): start preparing 1.5 s before it.
+    expect(nextAction(state({ quietFor: 2.9, peak: SOME_CHANGE })).type).toBe('wait');
+    expect(nextAction(state({ quietFor: 3.1, peak: SOME_CHANGE })).type).toBe('prepare');
   });
 
   it('prepares while still talking, near the end of a line', () => {
-    const action = nextAction(state({ speaking: true, secondsLeft: 0.4, peak: BIG_CHANGE - 0.01, delays: CHATTINESS.chatty }));
+    const action = nextAction(state({ speaking: true, secondsLeft: 0.4, peak: BIG_CHANGE - 0.01, delays: CHATTINESS.chatty, prepareSeconds: 2.5 }));
     expect(action).toMatchObject({ type: 'prepare', reason: 'some change', urgent: false });
   });
 
@@ -45,8 +49,8 @@ describe('preparing her next line', () => {
   });
 
   it('comments eventually on an unchanging screen', () => {
-    expect(nextAction(state({ quietFor: 20 })).type).toBe('wait');
-    expect(nextAction(state({ quietFor: 24 }))).toMatchObject({ type: 'prepare', reason: 'idle' });
+    expect(nextAction(state({ quietFor: 58 })).type).toBe('wait');
+    expect(nextAction(state({ quietFor: 59 }))).toMatchObject({ type: 'prepare', reason: 'idle' });
   });
 
   it('holds off after a failure', () => {
@@ -124,5 +128,47 @@ describe('your words', () => {
 
   it('keep her from starting a comment while you are talking', () => {
     expect(nextAction(state({ userSpeaking: true, quietFor: 100, peak: BIG_CHANGE })).type).toBe('wait');
+  });
+});
+
+describe('sharing the talking', () => {
+  it('leaves a longer pause after a longer line', () => {
+    expect(nextAction(state({ quietFor: 3.1, peak: SOME_CHANGE, lastLineSeconds: 5 })).type).toBe('wait');
+    expect(nextAction(state({ quietFor: 5.1, peak: SOME_CHANGE, lastLineSeconds: 5 })).type).toBe('prepare');
+  });
+
+  it('still takes a breath before a big moment', () => {
+    expect(nextAction(state({ quietFor: 0, peak: BIG_CHANGE, prepareSeconds: 0 })).type).toBe('wait');
+    expect(nextAction(state({ quietFor: 0.7, peak: BIG_CHANGE, prepareSeconds: 0 })).type).toBe('prepare');
+  });
+
+  it('over her share, only a big moment gets a line, and it waits its turn', () => {
+    const over = { talkShare: 0.4 };
+    expect(nextAction(state({ ...over, quietFor: 100, peak: SOME_CHANGE })).type).toBe('wait');
+    expect(nextAction(state({ ...over, speaking: true, secondsLeft: 6, peak: BIG_CHANGE })).type).toBe('wait');
+    expect(nextAction(state({ ...over, quietFor: 1.1, peak: BIG_CHANGE }))).toMatchObject({ type: 'prepare', urgent: false });
+  });
+
+  it('well over her share, she leaves the floor to you', () => {
+    expect(nextAction(state({ talkShare: 0.45, quietFor: 100, peak: BIG_CHANGE })).type).toBe('wait');
+    expect(nextAction(state({ talkShare: 0.45, next: line({ fromUser: true }) })).type).toBe('play');
+  });
+
+  it('waits twice as long after two lines in a row with nothing from you', () => {
+    expect(nextAction(state({ quietFor: 3.1, peak: SOME_CHANGE, unpromptedRun: 2 })).type).toBe('wait');
+    expect(nextAction(state({ quietFor: 7.6, peak: SOME_CHANGE, unpromptedRun: 2 })).type).toBe('prepare');
+  });
+
+  it('waits for your answer after asking you something', () => {
+    const asked = { askedYou: true, prepareSeconds: 0 };
+    expect(nextAction(state({ ...asked, quietFor: 5.9, peak: SOME_CHANGE })).type).toBe('wait');
+    expect(nextAction(state({ ...asked, quietFor: 6.1, peak: SOME_CHANGE })).type).toBe('prepare');
+    expect(nextAction(state({ ...asked, quietFor: 1.9, peak: BIG_CHANGE })).type).toBe('wait');
+    expect(nextAction(state({ ...asked, quietFor: 2.1, peak: BIG_CHANGE })).type).toBe('prepare');
+  });
+
+  it('presets talk less to more', () => {
+    expect(CHATTINESS.quiet.target).toBeLessThan(CHATTINESS.normal.target);
+    expect(CHATTINESS.normal.target).toBeLessThan(CHATTINESS.chatty.target);
   });
 });

@@ -103,6 +103,7 @@ export function buildTurnMonitor(speech: SpeechPlayer, director: Director) {
     }
     nextStatus.textContent = next ? `Up next: ${waitingOn(next)} (${next.info.reason}), ${((now - next.requestedAt) / 1000).toFixed(1)} s` : 'Up next: nothing yet';
     const notes = [
+      director.running ? `Talking ${Math.round(director.talkShare * 100)}% of the last 90 s` : '',
       director.replacedCount > 0 ? `Replaced for fresher lines: ${director.replacedCount}` : '',
       director.declinedCount > 0 ? `Stayed quiet: ${director.declinedCount} (last saw: ${director.lastSeen ?? '?'})` : '',
     ];

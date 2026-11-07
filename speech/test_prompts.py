@@ -127,5 +127,12 @@ def test_no_note_when_she_is_not_mid_line():
     assert "話している途中" not in look_message(CARD, "data:,", "", ACTS["opinion"], 2, [])[0]["text"]
 
 
+def test_verbal_habits_are_pointed_out():
+    lines = ["😲わ、すごいじゃん！", "😊いい感じじゃん", "🤔え、なにそれ？", "😆わ、やったね"]
+    assert prompts.repeated_habits(lines) == ["じゃん", "わ、"]
+    assert prompts.repeated_habits(["😊いいね", "🤔どうかな"]) == []
+    assert "「じゃん」「わ、」ばかり" in reply_message("x", "", ACTS["reply"], lines)
+
+
 def test_next_line_avoids_the_emoji_she_is_using_right_now():
     assert "最近使った絵文字: 😲" in reply_message("ねえ", "", ACTS["reply"], [], now_saying="😲うわ")

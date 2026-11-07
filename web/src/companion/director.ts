@@ -21,6 +21,10 @@ const ESTIMATE_WEIGHT = 0.3;
 const FAILURE_BACKOFF_MS = 2000;
 // After she looks and finds nothing worth saying, before looking again.
 const DECLINED_BACKOFF_MS = 5000;
+const SHARE_WINDOW_MS = 90_000;
+const SHARE_MIN_WINDOW_MS = 30_000;
+// A question mark near the end of her line, allowing for a closing emoji.
+const ASKS = /[？?][^？?]{0,4}$/u;
 
 interface Upcoming {
   line: PreparedLine;
@@ -62,6 +66,21 @@ export class Director {
   private aboutScreen = false;
   private backoffUntil = 0;
   private prepareSeconds = START_PREPARE_SECONDS;
+  // For pacing: when she was talking lately, her last line, and her lines since you last spoke.
+  private talked: { at: number; ms: number }[] = [];
+  private lastTick = performance.now();
+  private startedAt = performance.now();
+  private lastLineSeconds = 0;
+  private unpromptedRun = 0;
+  private askedYou = false;
+
+  /** Share of the last 90 s she spent talking, from 0 to 1, for pacing and the panel. */
+  get talkShare() {
+    const now = performance.now();
+    const spoken = this.talked.reduce((sum, item) => sum + item.ms, 0);
+    // Early on, a short window would make one line look like a lot.
+    return spoken / Math.max(SHARE_MIN_WINDOW_MS, Math.min(SHARE_WINDOW_MS, now - this.startedAt));
+  }
 
   constructor(private readonly speech: SpeechPlayer) {
     speech.onLineDone = (line) => this.commit(line);
@@ -95,6 +114,10 @@ export class Director {
     this.onShare?.(watcher.source);
     this.peakChange = 0;
     this.lastBusyAt = performance.now();
+    this.startedAt = performance.now();
+    this.talked = [];
+    this.unpromptedRun = 0;
+    this.askedYou = false;
     this.rollJitter();
     // She says hello first, mentioning last time if she remembers it.
     if (!this.upcoming) this.prepare('greeting', false, 0);
@@ -116,6 +139,8 @@ export class Director {
   /** Your words come first: her reply starts as soon as it's ready, and her voice fades into it. */
   say(text: string) {
     this.dropUpcoming();
+    this.unpromptedRun = 0;
+    this.askedYou = false;
     // The screen as you spoke, so she can answer 「これ何？」 ("What's this?").
     const image = this.watcher?.frame();
     const line = this.speech.prepare(TURN_URL, { kind: 'speech', text, image }, { reason: 'you spoke', frame: image ?? null, said: text });
@@ -125,8 +150,13 @@ export class Director {
 
   private update() {
     this.speech.poll();
+    const now = performance.now();
+    const elapsed = Math.min(now - this.lastTick, 250);
+    this.lastTick = now;
     if (!this.watcher && !this.upcoming) return;
     const speaking = this.speech.active;
+    if (speaking) this.talked.push({ at: now, ms: elapsed });
+    while (this.talked.length > 0 && this.talked[0].at < now - SHARE_WINDOW_MS) this.talked.shift();
     this.speech.watchScreen(speaking && this.aboutScreen);
     if (speaking || this.userSpeaking) this.lastBusyAt = performance.now();
     this.dropIfUnusable();
@@ -149,6 +179,10 @@ export class Director {
         backingOff: performance.now() < this.backoffUntil,
         delays: CHATTINESS[this.chattiness],
         jitter: this.jitter,
+        talkShare: this.talkShare,
+        lastLineSeconds: this.lastLineSeconds,
+        unpromptedRun: this.unpromptedRun,
+        askedYou: this.askedYou,
       }),
     );
   }
@@ -197,6 +231,7 @@ export class Director {
     this.upcoming = null;
     this.replacedThisLine = false;
     this.aboutScreen = !upcoming.fromUser;
+    this.unpromptedRun = upcoming.fromUser ? 0 : this.unpromptedRun + 1;
     this.lastBusyAt = performance.now();
     const { line } = upcoming;
     if (line.stages.ready) {
@@ -228,6 +263,9 @@ export class Director {
 
   /** Remembers only the sentences that were heard. */
   private commit(line: PreparedLine) {
+    // How long it lasted and whether it asked you something set the pause after it.
+    if (line.stages.speaking) this.lastLineSeconds = (performance.now() - line.stages.speaking) / 1000;
+    if (line.heard.length > 0) this.askedYou = ASKS.test(line.heard.join(''));
     if (!line.turnId) return;
     void fetch(COMMIT_URL, {
       method: 'POST',

@@ -103,7 +103,8 @@ def episode_from(data: dict, log: str, start: float, end: float) -> dict | None:
         "summary": data["summary"].strip()[:200],
         "highlights": strings("highlights", 3),
         "apps": strings("apps", 5),
-        "her": strings("her", 3),
+        # The model also offers its reactions and facts about you, so only her own statements stay.
+        "her": [s for s in strings("her", 3) if ("わたし" in s or "私" in s) and "きみ" not in s],
     }
 
 
