@@ -4,7 +4,7 @@ export const SOME_CHANGE = 0.02;
 // Below this is compression noise, not something happening.
 export const ANY_CHANGE = 0.005;
 
-export type TurnReason = 'you spoke' | 'big change' | 'some change' | 'check-in' | 'idle';
+export type TurnReason = 'you spoke' | 'big change' | 'some change' | 'check-in' | 'idle' | 'greeting';
 
 /** Seconds of pause after her last line before the next, by how much has happened on screen. */
 export const CHATTINESS = {

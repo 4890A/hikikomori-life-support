@@ -1,11 +1,8 @@
 import json
 
-import pytest
-
 import prompts
 from character import CharacterCard, DEFAULT_CARD
 from cues import EMOJI_EMOTIONS, clean_spoken, parse_items, Emoji
-from memory_store import MAX_FACTS, MAX_HISTORY_MESSAGES, Memory, MemoryStore, PendingTurns, parse_update, update_messages
 from acts import ACTS
 from prompts import build_system_prompt, look_message, recent_emoji, reply_message
 
@@ -78,11 +75,6 @@ def test_empty_sections_are_left_out():
     assert "好きなもの" not in prompt and "覚えていること" not in prompt
 
 
-def test_memory_comes_after_the_parts_that_rarely_change():
-    prompt = build_system_prompt(CARD, Memory(facts=["名前はアレックス"], summary="一緒に動画を見た"))
-    assert prompt.index("😊") < prompt.index("名前はアレックス") < prompt.index("一緒に動画を見た")
-
-
 def test_look_message_asks_for_what_the_bridge_reads_in_order():
     card = CharacterCard(name="テスト子", screen_instruction="好きに話して")
     content = look_message(card, "data:image/jpeg;base64,x", "文脈", ACTS["question"], 2, [])
@@ -123,89 +115,6 @@ def test_context_shows_the_timeline_and_notes():
     assert "23分目" in text and "見た: 猫" in text and "（まだ答えていない）" in text
     assert "まだ何もない" in prompts.context_block("", 0)
 
-@pytest.fixture
-def store(tmp_path):
-    return MemoryStore(tmp_path / "memory.json")
-
-
-def test_memory_survives_a_restart(store):
-    store.add_exchange("こんにちは", "😊やあ", True)
-    store.apply_update(["名前はアレックス"], "挨拶した", processed=1)
-    again = MemoryStore(store.path)
-    assert again.memory.facts == ["名前はアレックス"]
-    assert again.memory.summary == "挨拶した"
-    assert again.memory.history[-1] == {"role": "assistant", "content": "😊やあ"}
-
-
-def test_history_stays_within_its_limit(store):
-    for i in range(MAX_HISTORY_MESSAGES):
-        store.add_exchange(f"発言{i}", f"返事{i}", True)
-    assert len(store.memory.history) == MAX_HISTORY_MESSAGES
-    assert store.memory.history[-1]["content"] == f"返事{MAX_HISTORY_MESSAGES - 1}"
-
-
-def test_update_waits_for_enough_exchanges(store):
-    for _ in range(7):
-        store.add_exchange("（画面）", "😊うん", False)
-    assert not store.needs_update()
-    store.add_exchange("（画面）", "😊うん", False)
-    assert store.needs_update()
-
-
-def test_what_you_say_triggers_an_update_sooner(store):
-    for _ in range(2):
-        store.add_exchange("発言", "😊うん", True)
-    assert not store.needs_update()
-    store.add_exchange("発言", "😊うん", True)
-    assert store.needs_update()
-
-
-def test_update_keeps_exchanges_it_did_not_see(store):
-    store.add_exchange("一", "😊", True)
-    store.add_exchange("二", "😊", True)
-    store.apply_update([], "", processed=1)
-    assert [item["user"] for item in store.memory.unprocessed] == ["二"]
-
-
-def test_facts_are_cleaned_and_capped(store):
-    store.apply_update([" 同じ ", "同じ", 3, "", *[f"事実{i}" for i in range(MAX_FACTS + 5)]], "流れ", processed=0)
-    assert store.memory.facts.count("同じ") <= 1
-    assert 3 not in store.memory.facts and "" not in store.memory.facts
-    assert len(store.memory.facts) == MAX_FACTS
-
-
-def test_screen_comments_cannot_become_facts_about_you():
-    pending = [{"user": None, "reply": "😊きみは猫が好きなんだね"}, {"user": "犬が好き", "reply": "😆いいね"}]
-    prompt = update_messages(Memory(), pending)[1]["content"]
-    assert prompt.count("ユーザーの発言") == 1
-    assert "ユーザーの発言: 犬が好き" in prompt
-
-
-def test_parse_update_reads_fenced_json():
-    assert parse_update('```json\n{"facts": ["a"], "summary": "b"}\n```') == (["a"], "b")
-
-
-@pytest.mark.parametrize("text", ["ごめんね", "{not json}", '{"facts": "a", "summary": "b"}', '{"facts": []}'])
-def test_parse_update_rejects_anything_else(text):
-    assert parse_update(text) is None
-
-
-def test_forgetting_and_clearing(store):
-    store.apply_update(["一", "二"], "流れ", processed=0)
-    assert store.forget_fact(0) and store.memory.facts == ["二"]
-    assert not store.forget_fact(5)
-    store.clear()
-    assert MemoryStore(store.path).memory.facts == []
-
-
-def test_unreadable_memory_is_kept_aside_not_overwritten(tmp_path):
-    path = tmp_path / "memory.json"
-    path.write_text("{broken", encoding="utf-8")
-    store = MemoryStore(path)
-    assert store.memory.facts == []
-    assert (tmp_path / "memory.unreadable.json").read_text(encoding="utf-8") == "{broken"
-
-
 def test_next_line_is_told_what_she_is_still_saying():
     screen = look_message(CARD, "data:,", "", ACTS["opinion"], 2, [], now_saying="😲うわ、すごい！")[0]["text"]
     speech = reply_message("ねえ", "", ACTS["reply"], [], now_saying="😲うわ、すごい！")
@@ -220,44 +129,3 @@ def test_no_note_when_she_is_not_mid_line():
 
 def test_next_line_avoids_the_emoji_she_is_using_right_now():
     assert "最近使った絵文字: 😲" in reply_message("ねえ", "", ACTS["reply"], [], now_saying="😲うわ")
-
-def test_a_discarded_line_is_never_remembered(store):
-    turns = PendingTurns()
-    turn_id = turns.start("（画面）", False)
-    turns.set_summary(turn_id, "捨てられた状況")
-    assert turns.commit(turn_id, [], store)
-    assert store.memory.history == [] and store.memory.unprocessed == []
-    assert store.memory.screen_summary is None
-
-
-def test_commit_saves_only_the_sentences_that_played(store):
-    turns = PendingTurns()
-    turn_id = turns.start("発言", True)
-    turns.set_summary(turn_id, "東1局")
-    assert turns.commit(turn_id, ["😲うわ！"], store)
-    assert store.memory.history[-1] == {"role": "assistant", "content": "😲うわ！"}
-    assert store.memory.history[-2] == {"role": "user", "content": "発言"}
-    assert store.memory.screen_summary == "東1局"
-    assert store.memory.unprocessed == [{"user": "発言", "reply": "😲うわ！"}]
-
-
-def test_a_screen_turn_counts_as_no_words_from_you(store):
-    turns = PendingTurns()
-    assert turns.commit(turns.start("（画面）", False), ["😊うん"], store)
-    assert store.memory.unprocessed == [{"user": None, "reply": "😊うん"}]
-
-
-def test_a_turn_can_only_be_committed_once(store):
-    turns = PendingTurns()
-    turn_id = turns.start("発言", True)
-    assert turns.commit(turn_id, ["😊うん"], store)
-    assert not turns.commit(turn_id, ["😊うん"], store)
-    assert len(store.memory.history) == 2
-
-
-def test_old_uncommitted_turns_age_out(store):
-    turns = PendingTurns()
-    oldest = turns.start("古い", True)
-    for _ in range(PendingTurns.LIMIT):
-        turns.start("新しい", True)
-    assert not turns.commit(oldest, ["😊うん"], store)

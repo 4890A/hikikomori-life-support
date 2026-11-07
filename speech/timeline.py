@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -64,26 +65,48 @@ def render_event(event: Event, now: float) -> str | None:
     return None
 
 
+def read_log(path: Path) -> list[Event]:
+    events = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            data = json.loads(line)
+            events.append(Event(data["kind"], data.get("text", ""), data["t"], data.get("extra") or {}))
+        except (ValueError, KeyError, TypeError):
+            continue  # A line cut short when the bridge stopped.
+    return events
+
+
 class Timeline:
     def __init__(self, folder: Path | None) -> None:
         self.folder = folder
         self.events: list[Event] = []
         self.session_start = 0.0
         self.path: Path | None = None
+        # Called with a session's log once it's over, to make it into a memory.
+        self.on_session_end: Callable[[Path], None] | None = None
 
     def new_session(self) -> None:
         """Starts a fresh session now, even if the last one was recent."""
-        self.events = []
+        self.end_session()
         self._ensure_session(time.time())
+
+    def end_session(self) -> None:
+        if self.events and self.path is not None and self.on_session_end:
+            self.on_session_end(self.path)
+        self.events = []
 
     def _ensure_session(self, now: float) -> None:
         if self.events and now - self.events[-1].t < SESSION_GAP_SECONDS:
             return
-        self.events = []
+        self.end_session()
         self.session_start = now
         if self.folder is not None:
             stamp = time.strftime("%Y-%m-%dT%H-%M-%S", time.localtime(now))
             self.path = self.folder / f"{stamp}.jsonl"
+            count = 2
+            while self.path.exists():  # Two sessions within a second, as in tests and replays.
+                self.path = self.folder / f"{stamp}-{count}.jsonl"
+                count += 1
         self._append(Event(SESSION, "start", now))
 
     def add(self, kind: str, text: str = "", **extra) -> Event:

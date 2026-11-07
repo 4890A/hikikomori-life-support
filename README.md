@@ -75,6 +75,7 @@ Open http://localhost:5179, click **Start Companion** and pick a window.
 **Privacy:** frames from the window you share, and what she remembers about you, are sent to OpenRouter and its model providers. Share only the window you want her to see. Her memory, your character edits and a text log of each session (what she noted on screen, what you said and what she said, with no images or audio) stay in `companion-data/` on your PC, and you can delete them from the panel.
 
 - **Her character:** the **Character** section edits her personality, speaking style and rules, and shows the full prompt. The default is `characters/deepseek-chan.json`.
+- **Her memory:** she learns facts about you from what you say, remembers each session once you stop her, and greets you with what happened last time. The **Memory** section lists what she knows about you: click a fact to rewrite it, or add your own. Facts you wrote or edited are kept exactly as you wrote them. It also lists past sessions and things she said about herself, each of which you can forget.
 - **How often she talks:** the Quiet, Normal and Chatty setting.
 - **Where she looks:** she follows your mouse anywhere on the desktop, and looks at the window you share while she's reacting to it. If you share a whole screen or a tab she can't tell where it is, so pick a side under **Behaviour**. Drag her window around and she sways with it, hair and all. These positions stay on your PC.
 - **Her voice:** to change it, run `.\scripts\add-voice.ps1 another-clip.wav`, using only a voice you have the right to use.

@@ -22,13 +22,17 @@ if (-not $chrome) { throw 'Chrome is needed for the replay.' }
 $profileDir = Join-Path $env:TEMP 'companion-replay-profile'
 $nodeArgs = @((Join-Path $PSScriptRoot 'replay.mjs'), '--chrome', $chrome, '--profile', $profileDir, '--video', (Resolve-Path $Video).Path, '--minutes', $Minutes, '--chattiness', $Chattiness)
 foreach ($line in $Say) { $nodeArgs += @('--say', $line) }
+$log = $null
 try {
-    node @nodeArgs
+    node @nodeArgs | ForEach-Object {
+        $_
+        if ($_ -match '^session: .*"log":"([^"]+)"') { $log = $Matches[1] }
+    }
 } finally {
     foreach ($p in (Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object { $_.CommandLine -match 'companion-replay-profile' })) {
         Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
     }
 }
 $data = if ($env:COMPANION_DATA_DIR) { $env:COMPANION_DATA_DIR } else { Join-Path $Root 'companion-data' }
-$latest = Get-ChildItem (Join-Path $data 'sessions') -Filter '*.jsonl' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-uv run --no-sync python (Join-Path $Root 'scripts\session_report.py') $latest.FullName --transcript
+if (-not $log) { throw 'The replay did not start a session.' }
+uv run --no-sync python (Join-Path $Root 'scripts\session_report.py') (Join-Path (Join-Path $data 'sessions') $log) --transcript

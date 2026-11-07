@@ -33,6 +33,8 @@ PROVIDER_ORDER = {
 # A reply with no first word by now moves to the next model. The last model gets as long as it needs.
 FIRST_TOKEN_SECONDS = 1.5
 MAX_TOKENS = 150
+# Memory updates write JSON summaries, which are longer than a spoken line.
+BACKGROUND_MAX_TOKENS = 1000
 TEMPERATURE = 0.8
 LLM_TIMEOUT = httpx.Timeout(30.0)
 
@@ -61,11 +63,11 @@ def provider_preferences(model: str) -> dict:
     return {"order": order, "allow_fallbacks": True} if order else {"sort": "latency"}
 
 
-def request_body(model: str, messages: list[dict]) -> dict:
+def request_body(model: str, messages: list[dict], max_tokens: int = MAX_TOKENS) -> dict:
     return {
         "model": model,
         "stream": True,
-        "max_tokens": MAX_TOKENS,
+        "max_tokens": max_tokens,
         "temperature": TEMPERATURE,
         "provider": provider_preferences(model),
         "reasoning": REASONING_REQUIRED.get(model, REASONING_OFF),
@@ -73,10 +75,12 @@ def request_body(model: str, messages: list[dict]) -> dict:
     }
 
 
-async def stream_model(client: httpx.AsyncClient, key: str, model: str, messages: list[dict], info: StreamInfo) -> AsyncIterator[str]:
+async def stream_model(
+    client: httpx.AsyncClient, key: str, model: str, messages: list[dict], info: StreamInfo, max_tokens: int = MAX_TOKENS
+) -> AsyncIterator[str]:
     try:
         async with client.stream(
-            "POST", OPENROUTER_URL, json=request_body(model, messages), headers={"Authorization": f"Bearer {key}"}, timeout=LLM_TIMEOUT
+            "POST", OPENROUTER_URL, json=request_body(model, messages, max_tokens), headers={"Authorization": f"Bearer {key}"}, timeout=LLM_TIMEOUT
         ) as response:
             if response.status_code != 200:
                 detail = (await response.aread()).decode("utf-8", "replace")[:300]
@@ -99,7 +103,11 @@ async def stream_model(client: httpx.AsyncClient, key: str, model: str, messages
 
 
 async def stream_reply(
-    client: httpx.AsyncClient, messages: list[dict], info: StreamInfo, first_token_seconds: float | None = FIRST_TOKEN_SECONDS
+    client: httpx.AsyncClient,
+    messages: list[dict],
+    info: StreamInfo,
+    first_token_seconds: float | None = FIRST_TOKEN_SECONDS,
+    max_tokens: int = MAX_TOKENS,
 ) -> AsyncIterator[str]:
     """Yields reply text as it arrives, moving to the fallback model if the first gives no text in time.
 
@@ -113,7 +121,7 @@ async def stream_reply(
     models = (MODEL, FALLBACK_MODEL)
     failure = LLMError("no model configured")
     for position, model in enumerate(models):
-        stream = stream_model(client, key, model, messages, info)
+        stream = stream_model(client, key, model, messages, info, max_tokens)
         is_last = position == len(models) - 1
         wrote = False
         try:
@@ -137,7 +145,7 @@ async def stream_reply(
         logger.warning("%s", failure)
     raise failure
 
-async def complete(client: httpx.AsyncClient, messages: list[dict]) -> str:
+async def complete(client: httpx.AsyncClient, messages: list[dict], max_tokens: int = BACKGROUND_MAX_TOKENS) -> str:
     """The whole text of one reply, for background work where nobody is waiting on the first word."""
     info = StreamInfo()
-    return "".join([delta async for delta in stream_reply(client, messages, info, first_token_seconds=None)])
+    return "".join([delta async for delta in stream_reply(client, messages, info, first_token_seconds=None, max_tokens=max_tokens)])

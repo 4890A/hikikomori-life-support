@@ -10,7 +10,7 @@ import random
 from dataclasses import dataclass, replace
 
 # Why a line is being made, from the browser's turn-taking.
-REPLY, MOMENT, COMMENT, BEAT = "reply", "moment", "comment", "beat"
+REPLY, MOMENT, COMMENT, BEAT, GREETING = "reply", "moment", "comment", "beat", "greeting"
 CALLBACK_EVERY_SECONDS = 180
 REPLY_QUESTION_CHANCE = 0.3
 
@@ -36,6 +36,13 @@ ACTS = {
     "callback": Act("callback", "思い出話", "少し前にあったことや話したことを思い出して、今とつなげる。", 20, 50),
     "smalltalk": Act("smalltalk", "雑談", "画面から少し離れて、自分の好きなものや、きみのことを話題にする。", 15, 50),
     "reply": Act("reply", "返事", "きみの言ったことに、まず答える。", 15, 60),
+    "greeting": Act(
+        "greeting",
+        "あいさつ",
+        "見せてもらうものが始まるところであいさつする。前に会ったことがあれば、前回のことや久しぶりかどうかに軽く触れる。",
+        10,
+        40,
+    ),
 }
 
 WEIGHTS = {
@@ -61,6 +68,8 @@ def choose_act(
         return act
     if source == MOMENT:
         return ACTS["reaction"]
+    if source == GREETING:
+        return ACTS["greeting"]
     weights = dict(WEIGHTS.get(source, WEIGHTS[COMMENT]))
     if asked_last or "question" in recent[-2:]:
         weights.pop("question", None)

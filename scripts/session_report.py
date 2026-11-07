@@ -37,7 +37,7 @@ def report(path: Path, transcript: bool) -> None:
     if len(events) < 2:
         print(f"{path.name}: nothing happened")
         return
-    span = events[-1]["t"] - events[0]["t"]
+    span = max(events[-1]["t"] - events[0]["t"], 1e-9)
     minutes = max(span / 60, 1e-9)
     said = [e for e in events if e["kind"] == "said"]
     turns = [e for e in events if e["kind"] == "turn"]

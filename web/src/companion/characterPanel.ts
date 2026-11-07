@@ -14,11 +14,19 @@ interface Card {
   screen_instruction: string;
 }
 
-interface MemoryView {
-  facts: string[];
-  summary: string;
-  messages: number;
+interface Fact {
+  text: string;
+  source: 'you' | 'said' | 'guess';
 }
+
+interface MemoryView {
+  facts: Fact[];
+  her: string[];
+  episodes: { title: string; summary: string; when: string }[];
+  today: string;
+}
+
+const SOURCE_LABELS: Record<string, string> = { you: 'You wrote', said: 'You said', guess: 'Her guess' };
 
 const TEXT_FIELDS = [
   ['name', 'Name', 1],
@@ -68,30 +76,66 @@ export function buildCharacterPanel() {
 
   const prompt = el('pre', { className: 'prompt-preview' });
   const refreshPrompt = async () => {
-    prompt.textContent = (await request<{ system: string }>('/prompt')).system;
+    const { system, turn } = await request<{ system: string; turn: string }>('/prompt');
+    prompt.textContent = `${system}\n\n---- Added to each turn ----\n\n${turn}`;
   };
 
   const facts = el('ul', { className: 'facts' });
-  const summary = el('p', { className: 'hint' });
+  const her = el('ul', { className: 'facts' });
+  const episodes = el('ul', { className: 'facts' });
+  const today = el('p', { className: 'hint' });
+  const json = (method: string, body: unknown): RequestInit => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const forget = (path: string) =>
+    el('button', {
+      textContent: '×',
+      title: 'Forget this',
+      onclick: () => void change(() => request<MemoryView>(path, { method: 'DELETE' }).then(showMemory), 'Forgotten.'),
+    });
+  // Click a fact to rewrite it. Your version is kept as you wrote it.
+  const editable = (fact: Fact, index: number) => {
+    const text = el('span', { className: 'fact-text', textContent: fact.text, title: 'Click to edit' });
+    text.onclick = () => {
+      const input = el('input', { type: 'text', value: fact.text, maxLength: 80 });
+      const save = () => {
+        const value = input.value.trim();
+        if (!value || value === fact.text) return void refreshMemory();
+        void change(() => request<MemoryView>(`/memory/facts/${index}`, json('PUT', { text: value })).then(showMemory), 'Saved. She keeps it as you wrote it.');
+      };
+      input.onkeydown = (e) => {
+        if (e.key === 'Enter') save();
+        if (e.key === 'Escape') void refreshMemory();
+      };
+      input.onblur = save;
+      text.replaceWith(input);
+      input.focus();
+    };
+    return text;
+  };
   const showMemory = (memory: MemoryView) => {
     facts.replaceChildren(
       ...memory.facts.map((fact, index) =>
-        el(
-          'li',
-          {},
-          fact,
-          el('button', {
-            textContent: '×',
-            title: 'Forget this',
-            onclick: () => void change(() => request<MemoryView>(`/memory/facts/${index}`, { method: 'DELETE' }).then(showMemory), 'Forgotten.'),
-          }),
-        ),
+        el('li', {}, el('span', { className: 'fact-source', textContent: SOURCE_LABELS[fact.source] ?? '' }), editable(fact, index), forget(`/memory/facts/${index}`)),
       ),
     );
-    if (memory.facts.length === 0) facts.append(el('li', { className: 'hint', textContent: 'No facts yet. Tell her something about yourself.' }));
-    summary.textContent = memory.summary ? `So far: ${memory.summary}` : '';
+    if (memory.facts.length === 0) facts.append(el('li', { className: 'hint', textContent: 'Nothing yet. Tell her about yourself, or add something below.' }));
+    her.replaceChildren(...memory.her.map((bit, index) => el('li', {}, bit, forget(`/memory/her/${index}`))));
+    if (memory.her.length === 0) her.append(el('li', { className: 'hint', textContent: 'Nothing yet.' }));
+    episodes.replaceChildren(
+      ...memory.episodes
+        .map((episode, index) => el('li', { title: episode.summary }, `${episode.when}: ${episode.title}`, forget(`/memory/episodes/${index}`)))
+        .reverse(),
+    );
+    if (memory.episodes.length === 0) episodes.append(el('li', { className: 'hint', textContent: 'None yet. A session becomes one when you stop her.' }));
+    today.textContent = memory.today ? `Today so far: ${memory.today}` : '';
   };
   const refreshMemory = async () => showMemory(await request<MemoryView>('/memory'));
+  const newFact = el('input', { type: 'text', placeholder: 'Add something about you (Enter)', maxLength: 80 });
+  newFact.onkeydown = (e) => {
+    if (e.key !== 'Enter' || !newFact.value.trim()) return;
+    const text = newFact.value.trim();
+    newFact.value = '';
+    void change(() => request<MemoryView>('/memory/facts', json('POST', { text })).then(showMemory), 'Added.');
+  };
 
   const change = async (action: () => Promise<unknown>, done: string) => {
     try {
@@ -167,7 +211,19 @@ export function buildCharacterPanel() {
       ...LIST_FIELDS.map(([key, label, rows]) => field(key, label, rows)),
       el('div', { className: 'row' }, saveButton, resetButton),
     ),
-    details('Memory', () => void refreshMemory(), facts, summary, el('div', { className: 'row' }, clearButton)),
+    details(
+      'Memory',
+      () => void refreshMemory(),
+      el('p', { className: 'field-label', textContent: 'About you (click to edit)' }),
+      facts,
+      newFact,
+      el('p', { className: 'field-label', textContent: 'Past sessions' }),
+      episodes,
+      today,
+      el('p', { className: 'field-label', textContent: 'Things she said about herself' }),
+      her,
+      el('div', { className: 'row' }, clearButton),
+    ),
     details('Full prompt', () => void refreshPrompt(), prompt),
     status,
   );

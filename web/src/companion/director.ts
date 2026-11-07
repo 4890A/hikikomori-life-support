@@ -8,6 +8,7 @@ export { CHATTINESS, type Chattiness, type TurnReason };
 
 const TURN_URL = '/speech/companion/turn';
 const COMMIT_URL = '/speech/companion/commit';
+const SESSION_END_URL = '/speech/companion/session/end';
 // Often enough that a big change is acted on as soon as the watcher sees it.
 const TICK_MS = 33;
 const JITTER_MIN = 0.85;
@@ -64,6 +65,10 @@ export class Director {
 
   constructor(private readonly speech: SpeechPlayer) {
     speech.onLineDone = (line) => this.commit(line);
+    // Closing the page ends the session too, so it becomes a memory.
+    window.addEventListener('pagehide', () => {
+      if (this.watcher) this.endSession();
+    });
     // Always running, so your typed messages work with or without a shared window.
     startClock(TICK_MS, () => this.update());
   }
@@ -91,6 +96,8 @@ export class Director {
     this.peakChange = 0;
     this.lastBusyAt = performance.now();
     this.rollJitter();
+    // She says hello first, mentioning last time if she remembers it.
+    if (!this.upcoming) this.prepare('greeting', false, 0);
   }
 
   stop() {
@@ -98,7 +105,9 @@ export class Director {
     this.watcher.stop();
     this.watcher = null;
     this.dropUpcoming();
+    // Stopping her voice commits what was heard, which should land in this session before it ends.
     this.speech.stop();
+    this.endSession();
     this.speech.watchScreen(false);
     this.onShare?.(null);
     this.onStopped?.();
@@ -225,6 +234,11 @@ export class Director {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ turn_id: line.turnId, spoken: line.heard }),
     }).catch((err) => console.warn('could not save what she said:', err));
+  }
+
+  /** Lets the bridge turn this session into a memory. A beacon still gets through as the page closes. */
+  private endSession() {
+    navigator.sendBeacon(SESSION_END_URL);
   }
 
   private rollJitter() {

@@ -25,37 +25,44 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Literal
 
 import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from acts import BEAT, COMMENT, MOMENT, REPLY, Act, choose_act
+from acts import BEAT, COMMENT, GREETING, MOMENT, REPLY, Act, choose_act
 from character import DATA_DIR, CharacterCard, load_card, reset_card, save_card
 from cues import LookParser, ReplyEvents, ReplyParser
 from llm import FALLBACK_MODEL, MODEL, LLMError, StreamInfo, complete, stream_reply
-from memory_store import MemoryStore, PendingTurns, parse_update, update_messages
-from prompts import SCREEN_TURN_NOTE, build_system_prompt, context_block, look_message, reply_message
+from memory_store import MAX_FACT_CHARS, MemoryStore, PendingTurns, parse_json
+from prompts import build_system_prompt, context_block, look_message, reply_message
 import provider_check
+from recall import episode_from, episode_messages, facts_messages, memory_text, today_messages, transcript, when_was, worth_remembering
 from synthesis import TTS_TIMEOUT, TTSError, synthesize_segment
-from timeline import DECLINED, HEARD, SAID, SAME_NOTE, SEEN, TURN, Timeline, similarity
+from timeline import DECLINED, HEARD, SAID, SAME_NOTE, SEEN, TURN, Timeline, read_log, similarity
 from tts_request import DEFAULT_VOICE, MIN_SEGMENT_CHARS
 
 logger = logging.getLogger("speech-bridge")
 router = APIRouter(prefix="/companion")
 
+SESSIONS_DIR = DATA_DIR / "sessions"
 card: CharacterCard = load_card()
 store = MemoryStore(DATA_DIR / "memory.json")
-timeline = Timeline(DATA_DIR / "sessions")
+timeline = Timeline(SESSIONS_DIR)
 pending_turns = PendingTurns()
-updating_memory = False
 
 # Why the browser wants a screen line, and so what kind of line it is.
-SOURCE_OF_REASON = {"big change": MOMENT, "some change": COMMENT, "check-in": COMMENT, "idle": BEAT}
+SOURCE_OF_REASON = {"big change": MOMENT, "some change": COMMENT, "check-in": COMMENT, "idle": BEAT, "greeting": GREETING}
 # The interest (0-3) a look needs before she says anything: a big change needs little, a lull none.
-INTEREST_NEEDED = {MOMENT: 1, COMMENT: 2, BEAT: 0}
+INTEREST_NEEDED = {MOMENT: 1, COMMENT: 2, BEAT: 0, GREETING: 0}
+# How often the summary of today is brought up to date: whichever comes first.
+TODAY_EVERY_SECONDS = 240
+TODAY_EVERY_EVENTS = 20
+# At startup, sessions that ended without becoming memories are wrapped up, at most this many.
+WRAP_UP_AT_START = 3
 # Her last question still counts as open for this long.
 QUESTION_OPEN_SECONDS = 60
 # Events older than this give her something to call back to.
@@ -101,40 +108,111 @@ def pick_act(source: str) -> Act:
     )
 
 
-def build_messages(request: TurnRequest, act: Act, threshold: int) -> list[dict]:
+def build_messages(request: TurnRequest, act: Act, threshold: int, source: str) -> list[dict]:
     recent_lines = [e.text for e in timeline.said()]
     notes = []
     said = timeline.said(limit=1)
     if request.kind == "screen" and said and _ends_with_question(said[-1].text) and time.time() - said[-1].t < QUESTION_OPEN_SECONDS:
         notes.append("あなたのさっきの質問に、きみはまだ答えていない。同じ質問はしない")
-    context = context_block(timeline.render(), timeline.minutes_together(), notes=notes)
+    rendered = timeline.render()
+    # Older memories come up when they share words with what's happening now.
+    remembered = memory_text(store.memory, f"{rendered[-400:]} {request.text or ''}", greeting=source == GREETING)
+    context = context_block(rendered, timeline.minutes_together(), notes=notes, memory=remembered)
     if request.kind == "screen":
         content: str | list[dict] = look_message(card, request.image or "", context, act, threshold, recent_lines, request.now_saying)
     else:
         content = reply_message(request.text or "", context, act, recent_lines, request.now_saying, request.image)
-    return [{"role": "system", "content": build_system_prompt(card, store.memory)}, {"role": "user", "content": content}]
+    return [{"role": "system", "content": build_system_prompt(card)}, {"role": "user", "content": content}]
 
 
-async def update_memory() -> None:
-    """Folds recent exchanges into her summary and facts. A failure just tries again next time."""
-    global updating_memory
-    if updating_memory or not store.needs_update():
+# Background memory work. Each job runs once at a time, and a failure just tries again next time.
+_running: set[str] = set()
+_tasks: set[asyncio.Task] = set()
+_today = {"at": 0.0, "events": 0}
+
+
+def run_later(job) -> None:
+    try:
+        task = asyncio.get_running_loop().create_task(job)
+    except RuntimeError:
+        job.close()  # No event loop, as in tests: memory work is skipped.
         return
-    updating_memory = True
-    pending = list(store.memory.unprocessed)
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+
+async def ask_model(job: str, messages: list[dict]) -> dict | None:
+    if job in _running:
+        return None
+    _running.add(job)
     try:
         async with httpx.AsyncClient() as client:
-            text = await complete(client, update_messages(store.memory, pending))
-        update = parse_update(text)
-        if update is None:
-            logger.warning("memory update was not usable: %s", text[:200])
-            return
-        store.apply_update(*update, processed=len(pending))
-        logger.info("memory updated: %d facts, summary %s", len(store.memory.facts), store.memory.summary)
+            text = await complete(client, messages)
+        data = parse_json(text)
+        if data is None:
+            logger.warning("%s: reply was not usable: %s", job, text[:200])
+        return data
     except LLMError as exc:
-        logger.warning("memory update failed: %s", exc)
+        logger.warning("%s failed: %s", job, exc)
+        return None
     finally:
-        updating_memory = False
+        _running.discard(job)
+
+
+async def update_facts() -> None:
+    if not store.needs_facts():
+        return
+    words = list(store.memory.unread_words)
+    data = await ask_model("facts", facts_messages(store.memory, words))
+    if data and isinstance(data.get("facts"), list):
+        store.apply_facts(data["facts"], read=len(words))
+        logger.info("facts updated: %s", [f["text"] for f in store.memory.facts])
+
+
+def maybe_update_today() -> None:
+    shown = sum(1 for e in timeline.events if e.kind in (SEEN, HEARD, SAID))
+    if time.time() - _today["at"] < TODAY_EVERY_SECONDS and shown - _today["events"] < TODAY_EVERY_EVENTS:
+        return
+    _today["at"], _today["events"] = time.time(), shown
+    run_later(update_today())
+
+
+async def update_today() -> None:
+    text = transcript(timeline.events)
+    if not text or not worth_remembering(timeline.events):
+        return
+    log = timeline.path.name if timeline.path else None
+    data = await ask_model("today", today_messages(text))
+    if data and isinstance(data.get("today"), str):
+        store.set_today(log, data["today"])
+        logger.info("today: %s", store.memory.today)
+
+
+async def wrap_up(path: Path) -> None:
+    """Turns a finished session's log into an episode she can remember."""
+    if store.has_episode(path.name) or not path.exists():
+        return
+    events = read_log(path)
+    if not worth_remembering(events):
+        return
+    data = await ask_model(f"episode {path.name}", episode_messages(transcript(events), events[0].t))
+    episode = episode_from(data or {}, path.name, events[0].t, events[-1].t)
+    if episode and not store.has_episode(path.name):
+        store.add_episode(episode)
+        store.add_her(episode["her"])
+        logger.info("remembered session %s: %s", path.name, episode["title"])
+
+
+async def wrap_up_old_sessions() -> None:
+    """Sessions that ended while the bridge was stopped become memories now."""
+    if not SESSIONS_DIR.exists():
+        return
+    logs = sorted(SESSIONS_DIR.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in [p for p in logs if p != timeline.path and not store.has_episode(p.name)][:WRAP_UP_AT_START]:
+        await wrap_up(path)
+
+
+timeline.on_session_end = lambda path: run_later(wrap_up(path))
 
 
 async def turn_lines(request: TurnRequest) -> AsyncIterator[str]:
@@ -157,7 +235,10 @@ async def turn_lines(request: TurnRequest) -> AsyncIterator[str]:
     spoken: list[str] = []
     if is_speech:
         timeline.add(HEARD, request.text or "", typed=True)
-    turn_id = pending_turns.start(request.text if is_speech else SCREEN_TURN_NOTE, is_speech, act=act.key, source=source)
+        store.note_words(request.text or "")
+        run_later(update_facts())
+        maybe_update_today()
+    turn_id = pending_turns.start(act=act.key, source=source)
     out.put_nowait(line({"type": "turn", "turn_id": turn_id, "act": act.key}))
     looked = {"seen": False, "declined": False}
 
@@ -189,7 +270,7 @@ async def turn_lines(request: TurnRequest) -> AsyncIterator[str]:
     async def read_llm(client: httpx.AsyncClient) -> None:
         try:
             raw: list[str] = []
-            async for delta in stream_reply(client, build_messages(request, act, threshold), info):
+            async for delta in stream_reply(client, build_messages(request, act, threshold, source), info):
                 if "first_token" not in trace:
                     trace["first_token"] = since()
                     out.put_nowait(line({"type": "stage", "stage": "writing"}))
@@ -247,7 +328,6 @@ async def turn_lines(request: TurnRequest) -> AsyncIterator[str]:
             yield message
     finally:
         task.cancel()
-        pending_turns.set_summary(turn_id, parser.observation if isinstance(parser, LookParser) else None)
 
 
 @router.post("/turn")
@@ -262,7 +342,7 @@ async def turn(request: TurnRequest) -> StreamingResponse:
 @router.post("/commit")
 async def commit_turn(request: CommitRequest) -> dict:
     """Remembers the sentences of a reply that were actually heard."""
-    turn = pending_turns.commit(request.turn_id, request.spoken, store)
+    turn = pending_turns.commit(request.turn_id)
     if turn and request.spoken:
         written = turn["written"]
         timeline.add(
@@ -273,15 +353,23 @@ async def commit_turn(request: CommitRequest) -> dict:
             seconds=round(sum(written.get(text, 0.0) for text in request.spoken), 2),
             cut=len(request.spoken) < len(written),
         )
-        asyncio.ensure_future(update_memory())
+        store.seen_now()
+        maybe_update_today()
     return {"saved": turn is not None}
 
 
 @router.post("/session/start")
 async def start_session() -> dict:
-    """Begins a new session log, for a fresh start or a replay test."""
+    """Begins a new session log. The one before it becomes a memory in the background."""
     timeline.new_session()
     return {"log": timeline.path.name if timeline.path else None}
+
+
+@router.post("/session/end")
+async def end_session() -> dict:
+    """She was stopped or the page closed: this session becomes a memory now."""
+    timeline.end_session()
+    return {"ended": True}
 
 
 @router.get("/providers")
@@ -318,19 +406,50 @@ async def delete_character() -> CharacterCard:
 
 @router.get("/prompt")
 async def get_prompt() -> dict:
-    """Exactly what the LLM is told right now, to check an edit."""
-    return {"system": build_system_prompt(card, store.memory)}
+    """What the LLM is told: the fixed part, and the memories and recent events each turn adds."""
+    rendered = timeline.render()
+    remembered = memory_text(store.memory, rendered[-400:])
+    return {"system": build_system_prompt(card), "turn": context_block(rendered, timeline.minutes_together(), memory=remembered)}
+
+
+class FactText(BaseModel):
+    text: str = Field(min_length=1, max_length=MAX_FACT_CHARS)
 
 
 @router.get("/memory")
 async def get_memory() -> dict:
     memory = store.memory
-    return {"facts": memory.facts, "summary": memory.summary, "messages": len(memory.history)}
+    now = time.time()
+    return {
+        "facts": [{"text": f["text"], "source": f["source"]} for f in memory.facts],
+        "her": memory.her,
+        "episodes": [{"title": e["title"], "summary": e["summary"], "when": when_was(e["start"], now)} for e in memory.episodes],
+        "today": memory.today,
+    }
 
 
 @router.delete("/memory")
 async def clear_memory() -> dict:
+    """Forgets everything, including the session logs she'd make memories from."""
+    timeline.on_session_end = None
+    timeline.end_session()
+    timeline.on_session_end = lambda path: run_later(wrap_up(path))
     store.clear()
+    for path in SESSIONS_DIR.glob("*.jsonl") if SESSIONS_DIR.exists() else []:
+        path.unlink(missing_ok=True)
+    return await get_memory()
+
+
+@router.post("/memory/facts")
+async def add_fact(fact: FactText) -> dict:
+    store.add_fact(fact.text)
+    return await get_memory()
+
+
+@router.put("/memory/facts/{index}")
+async def edit_fact(index: int, fact: FactText) -> dict:
+    if not store.edit_fact(index, fact.text):
+        raise HTTPException(status_code=404, detail="no such fact")
     return await get_memory()
 
 
@@ -338,4 +457,18 @@ async def clear_memory() -> dict:
 async def forget_fact(index: int) -> dict:
     if not store.forget_fact(index):
         raise HTTPException(status_code=404, detail="no such fact")
+    return await get_memory()
+
+
+@router.delete("/memory/her/{index}")
+async def forget_her(index: int) -> dict:
+    if not store.forget_her(index):
+        raise HTTPException(status_code=404, detail="no such memory")
+    return await get_memory()
+
+
+@router.delete("/memory/episodes/{index}")
+async def forget_episode(index: int) -> dict:
+    if not store.forget_episode(index):
+        raise HTTPException(status_code=404, detail="no such memory")
     return await get_memory()

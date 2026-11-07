@@ -227,6 +227,29 @@ body {
   flex: none;
   padding: 0 6px;
 }
+
+.facts .fact-source {
+  flex: none;
+  font-size: 0.75em;
+  opacity: 0.6;
+  white-space: nowrap;
+}
+
+.facts .fact-text {
+  flex: 1;
+  cursor: text;
+}
+
+.facts li input {
+  flex: 1;
+  min-width: 0;
+}
+
+.field-label {
+  margin: 8px 0 2px;
+  font-size: 0.85em;
+  opacity: 0.75;
+}
 .prompt-preview {
   max-height: 320px;
   overflow: auto;

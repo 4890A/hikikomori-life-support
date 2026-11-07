@@ -20,6 +20,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 import synthesis
+import companion
 from companion import router as companion_router
 from cues import EMOJI_EMOTIONS, split_segments
 from desktop import router as desktop_router
@@ -33,7 +34,12 @@ logger = logging.getLogger("speech-bridge")
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Both run in the background, so the bridge is usable from the start.
-    background = [asyncio.create_task(warm_up()), asyncio.create_task(check_providers())]
+    background = [
+        asyncio.create_task(warm_up()),
+        asyncio.create_task(check_providers()),
+        # Sessions that ended while the bridge was stopped become memories.
+        asyncio.create_task(companion.wrap_up_old_sessions()),
+    ]
     yield
     for task in background:
         task.cancel()
