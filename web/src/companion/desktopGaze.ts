@@ -71,6 +71,13 @@ export class DesktopGaze {
     return this.state !== null && this.page !== null;
   }
 
+  /** The bottom-left corner of her page on the desktop, in CSS pixels, while it's known. */
+  get pageAnchor() {
+    if (!this.state?.page) return null;
+    const scale = window.devicePixelRatio;
+    return { x: this.state.page.left / scale, y: this.state.page.bottom / scale };
+  }
+
   /** What's being shared, or null when it stops. */
   share(source: ShareSource | null) {
     const changed = windowHandle(source) !== windowHandle(this.source);

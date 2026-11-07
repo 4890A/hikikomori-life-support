@@ -18,7 +18,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 AVAILABLE = sys.platform == "win32"
-POLL_SECONDS = 1 / 30
+# Often enough that a dragged window moves her smoothly.
+POLL_SECONDS = 1 / 60
 # How often to look for her page's window again, and to show the connection is alive when nothing moves.
 FIND_PAGE_SECONDS = 1.0
 KEEP_ALIVE_SECONDS = 15.0

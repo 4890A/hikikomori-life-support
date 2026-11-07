@@ -78,7 +78,11 @@ async function boot() {
     return model.toGlobal(new PIXI.Point(v[0], v[1]));
   };
   const desktopGaze = new DesktopGaze(animator.gaze, faceScreen);
-  app.ticker.add(() => desktopGaze.update());
+  // Dragging her window sways her.
+  app.ticker.add(() => {
+    desktopGaze.update();
+    animator!.inertia.setAnchor(desktopGaze.pageAnchor);
+  });
   // Only needed when the bridge can't say where the mouse is.
   window.addEventListener('pointermove', (e) => {
     if (desktopGaze.live) return;

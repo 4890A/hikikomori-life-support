@@ -2,6 +2,7 @@ import type { Params } from '../live2d';
 import { Blinker } from './blink';
 import { EMOTIONS, type Emotion, type EmotionWriter, type GazeBias } from './emotions';
 import { Gaze } from './gaze';
+import { Inertia } from './inertia';
 import { clamp, damp, lerp, Noise1D, rand, smoothstep } from './math';
 import { HeldMotionPlayer, Motion3 } from './motion3';
 import { Talker, VOWELS } from './talk';
@@ -117,6 +118,14 @@ export interface AnimatorOptions {
  */
 export class Animator {
   readonly gaze = new Gaze();
+  /** Her body trailing her window when it's dragged. Set its anchor from the window's position. */
+  readonly inertia = new Inertia();
+  /**
+   * How strongly that lag moves her, per CSS pixel, and the most it can. These parameters are the
+   * rig's physics inputs, so her hair and clothes swing with them as the rigger set up. (Cubism's
+   * wind would push the whole rig, body included, and makes some parts jump.)
+   */
+  readonly sway = { position: 0.1, tilt: 0.17, headTilt: 0.08, maxPosition: 15, maxTilt: 15 };
   readonly blink = new Blinker();
   readonly talk = new Talker();
   readonly options: AnimatorOptions = { idle: true, blink: true, followPointer: true };
@@ -325,6 +334,16 @@ export class Animator {
     this.add('AngleY', this.gaze.head.y * 24);
     this.add('AngleZ', -this.gaze.head.x * this.gaze.head.y * 8);
     this.add('PositionX', this.gaze.head.x * 7);
+
+    // 4b. Window dragging: her body trails the window and springs back, and physics swings her
+    // hair. Positive PositionX and ParamBodyAngleZ move her right, and positive PositionY up.
+    this.inertia.update(dt);
+    const { lag } = this.inertia;
+    const s = this.sway;
+    this.add('PositionX', clamp(lag.x * s.position, -s.maxPosition, s.maxPosition));
+    this.add('PositionY', clamp(-lag.y * s.position, -s.maxPosition, s.maxPosition));
+    this.add('ParamBodyAngleZ', clamp(lag.x * s.tilt, -s.maxTilt, s.maxTilt));
+    this.add('AngleZ', clamp(lag.x * s.headTilt, -s.maxTilt, s.maxTilt));
 
     // 5. Talking: mouth from the talker, emotion keeps the mouth shape; small head bobs.
     this.talk.update(dt);
