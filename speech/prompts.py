@@ -15,6 +15,7 @@ from character import CharacterCard
 RECENT_EMOJI_REPLIES = 3
 SCREEN_TURN_NOTE = "（画面を見て反応して）"
 OBSERVATION_CHARS = 20
+FEELING_LABEL = "表情"
 
 # What each emoji does to Irodori's voice (Irodori-TTS/irodori_tts/gradio_emoji_palette.py).
 # Emoji in EMOJI_EMOTIONS without an entry here are extras: they still drive the face.
@@ -167,6 +168,17 @@ def look_format(threshold: int) -> str:
         "（0=ほとんど変わらない、1=少し変わった、2=気になる変化、3=思わず声が出る）\n"
         f"{LINE_LABEL}: {line}"
     )
+
+
+def note_message(image_url: str, context: str) -> list[dict]:
+    """A quick look without speaking: what she sees, and how interesting it is."""
+    text = (
+        f"{context}\n\n画面を見て、次の3行だけを書く（ラベルもそのまま書く。セリフは書かない）:\n"
+        f"{OBSERVATION_LABEL}: 前に見たときから変わったところを中心に、今の画面を{OBSERVATION_CHARS}文字以内で。見えないことは書かない\n"
+        f"{INTEREST_LABEL}: 0〜3の数字だけ（0=ほとんど変わらない、1=少し変わった、2=気になる変化、3=思わず声が出る）\n"
+        f"{FEELING_LABEL}: それを見たあなたの気持ちに合う、表情が変わる絵文字を1つだけ"
+    )
+    return [{"type": "text", "text": text}, {"type": "image_url", "image_url": {"url": image_url}}]
 
 
 def look_message(

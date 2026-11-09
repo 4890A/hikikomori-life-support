@@ -81,7 +81,7 @@ export class PreparedLine {
   /** The sentences that have started playing. */
   heard: string[] = [];
   /** performance.now() when each stage was reached. */
-  stages: { writing?: number; tts?: number; ready?: number; speaking?: number } = {};
+  stages: { writing?: number; tts?: number; ready?: number; speaking?: number; done?: number } = {};
   readonly requestedAt = performance.now();
   readonly abort = new AbortController();
   gain: GainNode | null = null;
@@ -114,6 +114,10 @@ const SCHEDULE_LEAD_SECONDS = 0.05;
 const FADE_SECONDS = 0.15;
 // How long a reply's opening face holds before audio takes over with its own cues.
 const EXPRESSION_HOLD_SECONDS = 6;
+// A feeling she shows about something on screen without speaking.
+const FEELING_SECONDS = 2.5;
+/** The reason given to short sounds between lines, which aren't lines she says. */
+export const CLIP_REASON = 'aizuchi';
 
 const decodeBase64 = (data: string) => Uint8Array.from(atob(data), (c) => c.charCodeAt(0)).buffer;
 
@@ -193,6 +197,26 @@ export class SpeechPlayer {
   /** Whether she's talking about what's on screen, so she looks at it. */
   watchScreen(on: boolean) {
     this.animator.gaze.watchingScreen = on;
+  }
+
+  /** Shows a feeling on her face for a moment, without saying anything. Skipped while she talks. */
+  showFeeling(emotion: string, seconds = FEELING_SECONDS) {
+    if (this.active) return;
+    this.animator.react(emotion, seconds, { arms: false });
+  }
+
+  /** Plays a short sound such as 「へえ」 between lines, with its lips and face. Nothing is remembered. */
+  async playClip(segment: SpeechSegment) {
+    if (this.active || !this.ctx) return false;
+    const buffer = await this.ctx.decodeAudioData(decodeBase64(segment.audio_base64));
+    if (this.active) return false;
+    const line = new PreparedLine({ reason: CLIP_REASON, frame: null, said: null });
+    line.receiving = false;
+    line.written.push(segment.text);
+    line.decoded.push({ segment, buffer });
+    line.stages.ready = performance.now();
+    this.play(line);
+    return true;
   }
 
   speak(text: string) {
@@ -317,6 +341,7 @@ export class SpeechPlayer {
     if (line.finished) return;
     this.pollHeard(line);
     line.finished = true;
+    line.stages.done ??= performance.now();
     this.onLineDone?.(line);
   }
 

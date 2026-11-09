@@ -144,9 +144,13 @@ class Timeline:
             shown.append(event)
         return "\n".join(line for e in shown if (line := render_event(e, now)))
 
-    def last_seen(self, within: float, now: float | None = None) -> Event | None:
+    def last_seen(self, within: float, now: float | None = None, looks_only: bool = False) -> Event | None:
+        """looks_only: skip quick notes, keeping what she saw when she was about to speak."""
         now = time.time() if now is None else now
-        return next((e for e in reversed(self.events) if e.kind == SEEN and now - e.t <= within), None)
+        return next(
+            (e for e in reversed(self.events) if e.kind == SEEN and now - e.t <= within and not (looks_only and e.extra.get("note"))),
+            None,
+        )
 
     def said(self, limit: int = 3) -> list[Event]:
         return [e for e in self.events if e.kind == SAID][-limit:]

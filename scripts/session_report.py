@@ -60,6 +60,8 @@ def report(path: Path, transcript: bool) -> None:
     print(f"  gap between lines  median {median(gaps)} s, shortest {min(gaps):.1f} s" if gaps else "  gap between lines  -")
     print(f"  acts               {dict(Counter(e['extra'].get('act') or '?' for e in said).most_common())}")
     print(f"  stayed quiet       {sum(1 for e in events if e['kind'] == 'declined')} times ({sum(1 for e in events if e['kind'] == 'declined') / minutes:.1f} a minute)")
+    notes = sum(1 for e in events if e["kind"] == "seen" and e["extra"].get("note"))
+    print(f"  quick looks kept   {notes} ({notes / minutes:.1f} a minute, repeats of her last note aren't kept)")
     print(f"  your words         {sum(1 for e in events if e['kind'] == 'heard')}")
     print(f"  repeats            {repeats} similar lines back to back, {same_opening} same opening emoji back to back")
     print(f"  first audio        " + ", ".join(f"{k} {median(v)} s (n={len(v)})" for k, v in by_source.items()))

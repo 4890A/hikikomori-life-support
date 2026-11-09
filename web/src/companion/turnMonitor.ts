@@ -23,9 +23,10 @@ function savePreference(on: boolean) {
 
 /** Where a line has got to, and how long it took: Model, Writing, TTS, then playing. */
 function stepTimes(line: PreparedLine, now: number) {
-  const { writing, tts, ready, speaking } = line.stages;
+  const { writing, tts, ready, speaking, done } = line.stages;
   const span = (start: number | undefined, end: number | undefined) => (start === undefined ? null : (end ?? now) - start);
-  return [span(line.requestedAt, writing ?? tts ?? ready), span(writing, tts ?? ready), span(tts, ready), speaking === undefined ? null : now - speaking];
+  // Speaking stops counting when her voice does.
+  return [span(line.requestedAt, writing ?? tts ?? ready), span(writing, tts ?? ready), span(tts, ready), span(speaking, done)];
 }
 
 function waitingOn(line: PreparedLine) {
@@ -104,6 +105,7 @@ export function buildTurnMonitor(speech: SpeechPlayer, director: Director) {
     nextStatus.textContent = next ? `Up next: ${waitingOn(next)} (${next.info.reason}), ${((now - next.requestedAt) / 1000).toFixed(1)} s` : 'Up next: nothing yet';
     const notes = [
       director.running ? `Talking ${Math.round(director.talkShare * 100)}% of the last 90 s` : '',
+      director.notesCount > 0 ? `Quick looks: ${director.notesCount} (last: ${director.lastNote})` : '',
       director.replacedCount > 0 ? `Replaced for fresher lines: ${director.replacedCount}` : '',
       director.declinedCount > 0 ? `Stayed quiet: ${director.declinedCount} (last saw: ${director.lastSeen ?? '?'})` : '',
     ];

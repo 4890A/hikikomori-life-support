@@ -1,12 +1,26 @@
-import type { PreparedLine, SpeechPlayer } from '../anim/speech';
+import { CLIP_REASON, type PreparedLine, type SpeechPlayer, type SpeechSegment } from '../anim/speech';
 import { startClock } from './clock';
 import type { ShareSource } from './desktopGaze';
-import { BIG_CHANGE, CHATTINESS, nextAction, type Action, type Chattiness, type TurnReason } from './pacing';
+import { ANY_CHANGE, BIG_CHANGE, CHATTINESS, nextAction, SOME_CHANGE, type Action, type Chattiness, type TurnReason } from './pacing';
 import { ScreenWatcher } from './screen';
 
 export { CHATTINESS, type Chattiness, type TurnReason };
 
 const TURN_URL = '/speech/companion/turn';
+const NOTE_URL = '/speech/companion/observe';
+// Between lines she glances at the screen this often while it keeps changing, to remember it.
+const NOTE_EVERY_MS = 3000;
+const AIZUCHI_URL = '/speech/companion/aizuchi';
+// Short sounds between lines: at most one this often, and only some of the times she could.
+const AIZUCHI_GAP_MS = 8000;
+const AIZUCHI_CHANCE = 0.5;
+
+interface Note {
+  seen: string | null;
+  interest: number | null;
+  new: boolean;
+  emotion: string | null;
+}
 const COMMIT_URL = '/speech/companion/commit';
 const SESSION_END_URL = '/speech/companion/session/end';
 // Often enough that a big change is acted on as soon as the watcher sees it.
@@ -73,6 +87,19 @@ export class Director {
   private lastLineSeconds = 0;
   private unpromptedRun = 0;
   private askedYou = false;
+  // Quick looks between lines: the change since the last one, and how interesting it found things.
+  private noting = false;
+  private lastNoteAt = 0;
+  private changeSinceNote = 0;
+  private noticed = 0;
+  /** How many quick looks she's taken, and the last thing she noticed, for the panel. */
+  notesCount = 0;
+  lastNote: string | null = null;
+  private aizuchi: SpeechSegment[] = [];
+  /** The short sounds she has made between lines, for the panel and replays. */
+  aizuchiPlayed: string[] = [];
+  private lastAizuchi = '';
+  private lastAizuchiAt = 0;
 
   /** Share of the last 90 s she spent talking, from 0 to 1, for pacing and the panel. */
   get talkShare() {
@@ -108,6 +135,7 @@ export class Director {
     await watcher.start();
     watcher.onChange = (fraction) => {
       this.peakChange = Math.max(this.peakChange, fraction);
+      this.changeSinceNote = Math.max(this.changeSinceNote, fraction);
     };
     watcher.onEnded = () => this.stop();
     this.watcher = watcher;
@@ -121,6 +149,7 @@ export class Director {
     this.rollJitter();
     // She says hello first, mentioning last time if she remembers it.
     if (!this.upcoming) this.prepare('greeting', false, 0);
+    void this.loadAizuchi();
   }
 
   stop() {
@@ -160,6 +189,7 @@ export class Director {
     this.speech.watchScreen(speaking && this.aboutScreen);
     if (speaking || this.userSpeaking) this.lastBusyAt = performance.now();
     this.dropIfUnusable();
+    this.takeNote(now);
     if (speaking && this.peakChange >= BIG_CHANGE && !this.glanced) {
       this.glanced = true;
       this.speech.glance();
@@ -171,7 +201,8 @@ export class Director {
         secondsLeft: this.speech.secondsLeft,
         hasLaterSentences: this.speech.hasLaterSentences,
         quietFor: (performance.now() - this.lastBusyAt) / 1000,
-        peak: this.peakChange,
+        // Something a quick look found interesting counts like a change on screen.
+        peak: Math.max(this.peakChange, this.noticed >= 3 ? BIG_CHANGE : this.noticed >= 2 ? SOME_CHANGE : 0),
         next: upcoming && { ready: upcoming.line.ready, urgent: upcoming.urgent, fromUser: upcoming.fromUser, pause: upcoming.pause },
         replacedThisLine: this.replacedThisLine,
         userSpeaking: this.userSpeaking,
@@ -212,9 +243,64 @@ export class Director {
     }
   }
 
+  /** A quick look at the screen, without speaking, while it keeps changing. */
+  private takeNote(now: number) {
+    const watcher = this.watcher;
+    if (!watcher || this.noting || now - this.lastNoteAt < NOTE_EVERY_MS || this.changeSinceNote < ANY_CHANGE) return;
+    // A line being written looks at the screen anyway.
+    if (this.upcoming && !this.upcoming.line.ready && !this.upcoming.line.empty) return;
+    this.noting = true;
+    this.lastNoteAt = now;
+    this.changeSinceNote = 0;
+    void fetch(NOTE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: watcher.frame() }) })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((note: Note | null) => {
+        if (!note?.seen) return;
+        this.notesCount += 1;
+        this.lastNote = note.seen;
+        if (!note.new) return;
+        if (note.interest !== null) this.noticed = Math.max(this.noticed, note.interest);
+        this.fillPause(note);
+      })
+      .catch((err) => console.warn('quick look failed:', err))
+      .finally(() => {
+        this.noting = false;
+      });
+  }
+
+  /**
+   * While she's quiet, she reacts to what a quick look noticed: her face shows it, and now and then
+   * she makes a small sound like 「へえ」, never the same one twice running.
+   */
+  private fillPause(note: Note) {
+    if (this.speech.active || this.userSpeaking) return;
+    if (note.emotion) this.speech.showFeeling(note.emotion);
+    const now = performance.now();
+    if ((note.interest ?? 0) < 1 || now - this.lastAizuchiAt < AIZUCHI_GAP_MS || Math.random() > AIZUCHI_CHANCE) return;
+    const choices = this.aizuchi.filter((clip) => clip.text !== this.lastAizuchi);
+    if (choices.length === 0) return;
+    const clip = choices[Math.floor(Math.random() * choices.length)];
+    this.lastAizuchiAt = now;
+    this.lastAizuchi = clip.text;
+    void this.speech.playClip(clip).then((played) => {
+      if (played) this.aizuchiPlayed.push(clip.text);
+    });
+  }
+
+  private async loadAizuchi() {
+    if (this.aizuchi.length > 0) return;
+    try {
+      const response = await fetch(AIZUCHI_URL);
+      if (response.ok) this.aizuchi = ((await response.json()) as { clips: SpeechSegment[] }).clips;
+    } catch (err) {
+      console.warn('aizuchi clips not loaded:', err);
+    }
+  }
+
   private prepare(reason: TurnReason, urgent: boolean, pause: number) {
     if (!this.watcher) return;
     this.peakChange = 0;
+    this.noticed = 0;
     // Only what changes after this picture counts next.
     this.watcher.rebase();
     this.glanced = false;
@@ -263,6 +349,8 @@ export class Director {
 
   /** Remembers only the sentences that were heard. */
   private commit(line: PreparedLine) {
+    // A short sound between lines isn't a line: it doesn't change her pauses or get remembered.
+    if (line.info.reason === CLIP_REASON) return;
     // How long it lasted and whether it asked you something set the pause after it.
     if (line.stages.speaking) this.lastLineSeconds = (performance.now() - line.stages.speaking) / 1000;
     if (line.heard.length > 0) this.askedYou = ASKS.test(line.heard.join(''));

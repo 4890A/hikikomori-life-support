@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -35,10 +36,10 @@ from pydantic import BaseModel, Field
 
 from acts import BEAT, COMMENT, GREETING, MOMENT, REPLY, Act, choose_act
 from character import DATA_DIR, CharacterCard, load_card, reset_card, save_card
-from cues import LookParser, ReplyEvents, ReplyParser
+from cues import _EMOJI, EMOJI_EMOTIONS, LookParser, ReplyEvents, ReplyParser
 from llm import FALLBACK_MODEL, MODEL, LLMError, StreamInfo, complete, stream_reply
 from memory_store import MAX_FACT_CHARS, MemoryStore, PendingTurns, parse_json
-from prompts import build_system_prompt, context_block, look_message, reply_message
+from prompts import FEELING_LABEL, build_system_prompt, context_block, look_message, note_message, reply_message
 import provider_check
 from recall import episode_from, episode_messages, facts_messages, memory_text, today_messages, transcript, when_was, worth_remembering
 from synthesis import TTS_TIMEOUT, TTSError, synthesize_segment
@@ -57,7 +58,7 @@ pending_turns = PendingTurns()
 # Why the browser wants a screen line, and so what kind of line it is.
 SOURCE_OF_REASON = {"big change": MOMENT, "some change": COMMENT, "check-in": COMMENT, "idle": BEAT, "greeting": GREETING}
 # The interest (0-3) a look needs before she says anything: a big change needs little, a lull none.
-INTEREST_NEEDED = {MOMENT: 1, COMMENT: 2, BEAT: 0, GREETING: 0}
+INTEREST_NEEDED = {MOMENT: 1, COMMENT: 1, BEAT: 0, GREETING: 0}
 # How often the summary of today is brought up to date: whichever comes first.
 TODAY_EVERY_SECONDS = 240
 TODAY_EVERY_EVENTS = 20
@@ -70,7 +71,10 @@ CALLBACK_AFTER_SECONDS = 60
 # A comment repeating what she noted this recently is declined.
 STALE_WITHIN_SECONDS = 45
 # A big change this soon after her last reaction is treated as an ordinary comment.
-MOMENT_SPACING_SECONDS = 30
+MOMENT_SPACING_SECONDS = 12
+# A note is three short lines, and is never spoken.
+NOTE_MAX_TOKENS = 70
+NOTE_NEVER_SPEAKS = 99
 
 
 class TurnRequest(BaseModel):
@@ -233,7 +237,7 @@ async def turn_lines(request: TurnRequest) -> AsyncIterator[str]:
     out: asyncio.Queue[str | None] = asyncio.Queue()
     to_speak: asyncio.Queue[str | None] = asyncio.Queue()
     # A comment on what she just saw is a repeat. A big change or a lull may still be worth a line.
-    previous = None if is_speech or source != COMMENT else timeline.last_seen(STALE_WITHIN_SECONDS)
+    previous = None if is_speech or source != COMMENT else timeline.last_seen(STALE_WITHIN_SECONDS, looks_only=True)
     is_stale = (lambda seen: similarity(seen, previous.text) >= SAME_NOTE) if previous else None
     parser: LookParser | ReplyParser = (
         ReplyParser(MIN_SEGMENT_CHARS) if is_speech else LookParser(threshold, MIN_SEGMENT_CHARS, is_stale=is_stale)
@@ -344,6 +348,64 @@ async def turn(request: TurnRequest) -> StreamingResponse:
     if request.kind == "screen" and not (request.image and request.image.startswith("data:image/")):
         raise HTTPException(status_code=400, detail="a screen turn needs an image data URL")
     return StreamingResponse(turn_lines(request), media_type="application/x-ndjson")
+
+
+class NoteRequest(BaseModel):
+    image: str  # Data URL of a JPEG frame.
+
+
+@router.post("/observe")
+async def observe(request: NoteRequest) -> dict:
+    """A quick look between lines, so she remembers what happened while she was quiet.
+
+    Returns what she noted and how interesting it was, which the browser uses to decide whether
+    it's worth a line. A note repeating her last one isn't kept.
+    """
+    if not request.image.startswith("data:image/"):
+        raise HTTPException(status_code=400, detail="a note needs an image data URL")
+    context = context_block(timeline.render(), timeline.minutes_together())
+    messages = [{"role": "system", "content": build_system_prompt(card)}, {"role": "user", "content": note_message(request.image, context)}]
+    try:
+        async with httpx.AsyncClient() as client:
+            text = await complete(client, messages, max_tokens=NOTE_MAX_TOKENS)
+    except LLMError as exc:
+        logger.warning("note failed: %s", exc)
+        return {"seen": None, "interest": None, "new": False}
+    parser = LookParser(threshold=NOTE_NEVER_SPEAKS)
+    parser.feed(text)
+    parser.finish()
+    if not parser.observation:
+        return {"seen": None, "interest": None, "new": False, "emotion": None}
+    last = timeline.last_seen(STALE_WITHIN_SECONDS)
+    new = not (last and similarity(parser.observation, last.text) >= SAME_NOTE)
+    if new:
+        timeline.add(SEEN, parser.observation, interest=parser.interest, note=True)
+        maybe_update_today()
+    # Her face can react to what she noticed, even when she says nothing.
+    feeling = re.search(rf"{FEELING_LABEL}\s*[:：]\s*(.*)", text)
+    emoji = _EMOJI.search(feeling.group(1)) if feeling else None
+    emotion = EMOJI_EMOTIONS.get(emoji.group(0)) if emoji else None
+    return {"seen": parser.observation, "interest": parser.interest, "new": new, "emotion": emotion}
+
+
+# Short sounds she makes between lines, made once in her voice and cached.
+AIZUCHI = ["🤔ふーん", "😊へえ", "😮おお", "🤭ふふ", "😌うんうん", "😲わっ", "🤔んー", "😆あはは", "😯ほう", "😏ほほう"]
+_aizuchi: list[dict] = []
+_aizuchi_lock = asyncio.Lock()
+
+
+@router.get("/aizuchi")
+async def aizuchi() -> dict:
+    """The clips, with their lip tracks and faces, made on first use."""
+    async with _aizuchi_lock:
+        if not _aizuchi:
+            async with httpx.AsyncClient(timeout=TTS_TIMEOUT) as client:
+                for text in AIZUCHI:
+                    try:
+                        _aizuchi.append(await synthesize_segment(client, text))
+                    except TTSError as exc:
+                        logger.warning("aizuchi %s failed: %s", text, exc)
+    return {"clips": _aizuchi}
 
 
 @router.post("/commit")

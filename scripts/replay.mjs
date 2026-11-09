@@ -84,6 +84,7 @@ while (Date.now() - started < total) {
   }
   await sleep(500);
 }
+console.log('between lines:', await run(`JSON.stringify({ quickLooks: director.notesCount, stayedQuiet: director.declinedCount, aizuchi: director.aizuchiPlayed })`));
 await run('director.stop()');
 await sleep(1500);
 console.log('page errors:', errors.length ? errors.slice(0, 5) : 'none');

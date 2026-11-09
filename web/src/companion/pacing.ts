@@ -12,18 +12,19 @@ export type TurnReason = 'you spoke' | 'big change' | 'some change' | 'check-in'
  * for smaller changes. idle: seconds of quiet before she talks about nothing in particular.
  */
 export const CHATTINESS = {
-  quiet: { target: 0.15, base: 4, some: 6, any: 14, idle: 150 },
-  normal: { target: 0.33, base: 2.5, some: 2, any: 8, idle: 60 },
-  chatty: { target: 0.45, base: 1.2, some: 0.5, any: 3, idle: 30 },
+  quiet: { target: 0.25, base: 2.5, some: 3, any: 10, idle: 90 },
+  normal: { target: 0.45, base: 1.2, some: 0.8, any: 4, idle: 30 },
+  chatty: { target: 0.6, base: 0.6, some: 0.3, any: 2, idle: 18 },
 };
 // Even a big moment leaves this much quiet after her last line, plus a little per second of it.
-const MIN_BIG_PAUSE = 0.6;
-const BIG_PAUSE_PER_LINE_SECOND = 0.15;
-const PAUSE_PER_LINE_SECOND = 0.4;
+const MIN_BIG_PAUSE = 0.5;
+const BIG_PAUSE_PER_LINE_SECOND = 0.1;
+const PAUSE_PER_LINE_SECOND = 0.25;
 // Past the target she only reacts to big moments; past this many times it, only to you.
 const OVER_TARGET = 1.3;
-// After this many lines in a row without you saying anything, she waits twice as long.
-const RUN_LIMIT = 2;
+// After this many lines in a row without you saying anything, she waits a little longer.
+const RUN_LIMIT = 4;
+const RUN_SLOWDOWN = 1.5;
 // After she asks you something, she waits this long for an answer, and only a big moment after 2 s.
 export const ANSWER_WAIT_SECONDS = 6;
 const ANSWER_BIG_AFTER_SECONDS = 2;
@@ -90,7 +91,7 @@ function tier(state: PacingState): { reason: TurnReason; delay: number; urgent: 
   if (state.askedYou && state.quietFor < ANSWER_WAIT_SECONDS && !(big && state.quietFor >= ANSWER_BIG_AFTER_SECONDS)) return null;
 
   const breath = delays.base + PAUSE_PER_LINE_SECOND * state.lastLineSeconds;
-  const run = state.unpromptedRun >= RUN_LIMIT ? 2 : 1;
+  const run = state.unpromptedRun >= RUN_LIMIT ? RUN_SLOWDOWN : 1;
   if (big) {
     // Over the target a big moment still counts, but it waits its turn like any other line.
     if (overTarget) return { reason: 'big change', delay: breath * run, urgent: false };
